@@ -1,0 +1,10 @@
+name: sdf1  # 这里改了，服务器里的文件夹就会叫 sdf1
+version: 1.0
+main: com.myplugin.Main
+api-version: '1.21'
+author: 小白
+
+commands:
+  sdf1:
+    description: 验证计分板
+    usage: /sdf1 [reload]
