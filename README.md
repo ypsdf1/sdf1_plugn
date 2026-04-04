@@ -16,7 +16,7 @@
 ## 数据库介绍
 - 本插件轻量化，使用的是原版积分板作为数据库。未配置任何远程数据库或sqllite数据库。使用两个记分板。作为数据库，一个用来存储口令，一个用来存储玩家有没有兑换过这条口令。
 - 创建记分板指令为scoreboard object add name dummy
-- 创建口令指令为Scoreboard player set name1 name2 1 参数解析: Name一表示口令名字，Name二表示数据库名字
+- 创建口令指令为Scoreboard player set username sqlname 1 参数解析: username是口令的名字，sqlname是计分板名字
 
 ## 注意事项
 - 本插件由gemini全程编写。如有问题请提交工单！
