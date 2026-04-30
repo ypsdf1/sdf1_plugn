@@ -10,6 +10,10 @@ commands:
     usage: /sdf1
     permission: cy.use
     permission-message: §c你没有权限使用此命令
+  import:
+    description: 导入口令
+    permission: import.op
+    permission-message: 无权限
 permissions:
   sdf1.use:
     description: 使用 /sdf1 基础命令
