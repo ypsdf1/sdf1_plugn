@@ -26,9 +26,9 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.security.cert.X509Certificate;
-import java.text.SimpleDateFormat;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -42,7 +42,6 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private String cfgCdkObj = "";
     private String cfgCyName = "";
-    // ===== 改动1: cfgVer 从 int 改为 String, 保留完整版本号 =====
     private String cfgVer = "";
     private boolean configLoaded = false;
     private boolean cdksWarned = false;
@@ -118,10 +117,12 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         CN_NUMS.put("六",6); CN_NUMS.put("七",7); CN_NUMS.put("八",8);
         CN_NUMS.put("九",9); CN_NUMS.put("十",10); CN_NUMS.put("百",100);
         CN_NUMS.put("千",1000); CN_NUMS.put("万",10000);
+        CN_NUMS.put("亿",100000000);
         CN_NUMS.put("壹",1); CN_NUMS.put("贰",2); CN_NUMS.put("叁",3);
         CN_NUMS.put("肆",4); CN_NUMS.put("伍",5); CN_NUMS.put("陆",6);
         CN_NUMS.put("柒",7); CN_NUMS.put("捌",8); CN_NUMS.put("玖",9);
         CN_NUMS.put("拾",10); CN_NUMS.put("佰",100); CN_NUMS.put("仟",1000);
+        CN_NUMS.put("两",2);
     }
 
     private static class ActionEntry {
@@ -138,6 +139,16 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         boolean deleteCode = false;
         boolean recordName = false;
     }
+
+    // ===== 撤销记录 =====
+    private static class UndoRecord {
+        String code;
+        int scoreValue;
+        UndoRecord(String c, int s) { code = c; scoreValue = s; }
+    }
+
+    private final List<UndoRecord> undoBuf = new ArrayList<UndoRecord>();
+    private boolean canUndo = false;
 
     private String colorize(String s) {
         if (s == null) return "";
@@ -244,7 +255,6 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         writeFallbackConfig(f);
     }
 
-    // ===== 改动2: 默认配置版本号写为 "1.0" 而非 "1" =====
     private void writeFallbackConfig(File f) {
         try {
             File parent = f.getParentFile();
@@ -279,7 +289,6 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         cdksWarned = false;
         cfgCdkObj = "";
         cfgCyName = "";
-        // ===== 改动3: cfgVer 清空用空字符串 =====
         cfgVer = "";
         cfgLinkMode = "";
         cfgUpdateChannel = "";
@@ -288,11 +297,48 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         if (!f.exists() || f.length() == 0) extractDefaultConfig();
         try {
             List<String> rawLines = new ArrayList<String>();
+            Charset encoding = detectEncoding(f);
+            log("[SDF1] 配置编码: " + encoding.name());
             BufferedReader r = new BufferedReader(new InputStreamReader(
-                    new FileInputStream(f), StandardCharsets.UTF_8));
+                    new FileInputStream(f), encoding));
             String line;
             while ((line = r.readLine()) != null) rawLines.add(line);
             r.close();
+            log("[SDF1-诊断] 文件编码检测: " + encoding.name());
+            log("[SDF1-诊断] 文件大小: " + f.length() + " 字节");
+            log("[SDF1-诊断] ===== 原始行内容(前20行) =====");
+            for (int i = 0; i < Math.min(20, rawLines.size()); i++) {
+                String raw = rawLines.get(i);
+                log("[SDF1-诊断] L" + (i + 1) + ": [" + raw + "]");
+                StringBuilder hex = new StringBuilder();
+                for (int j = 0; j < Math.min(60, raw.length()); j++) {
+                    char c = raw.charAt(j);
+                    hex.append(String.format("U+%04X ", (int) c));
+                }
+                log("[SDF1-诊断] L" + (i + 1) + "码点: " + hex.toString().trim());
+            }
+            log("[SDF1-诊断] ===== 原始行抄送完毕 =====");
+            log("[SDF1-诊断] ===== 标准化后内容(前20行) =====");
+            for (int i = 0; i < Math.min(20, rawLines.size()); i++) {
+                String raw = rawLines.get(i).trim();
+                String norm = normalizeText(raw);
+                if (!raw.equals(norm)) {
+                    log("[SDF1-诊断] L" + (i + 1) + " 有变化!");
+                    log("[SDF1-诊断]   原始: [" + raw + "]");
+                    log("[SDF1-诊断]   标准: [" + norm + "]");
+                    StringBuilder hexOrig = new StringBuilder();
+                    StringBuilder hexNorm = new StringBuilder();
+                    for (int j = 0; j < Math.min(40, raw.length()); j++) {
+                        hexOrig.append(String.format("U+%04X ", (int) raw.charAt(j)));
+                    }
+                    for (int j = 0; j < Math.min(40, norm.length()); j++) {
+                        hexNorm.append(String.format("U+%04X ", (int) norm.charAt(j)));
+                    }
+                    log("[SDF1-诊断]   原始码点: " + hexOrig.toString().trim());
+                    log("[SDF1-诊断]   标准码点: " + hexNorm.toString().trim());
+                }
+            }
+            log("[SDF1-诊断] ===== 标准化抄送完毕 =====");
             if (verbose) {
                 log("===== 配置原文 =====");
                 for (int i = 0; i < rawLines.size(); i++)
@@ -378,10 +424,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 diag.add("  -> [跳过] 未知: \"" + key + "\"");
             }
         }
-
-        // ===== 改动4: 版本号直接作为字符串保留, 不再转int =====
         cfgVer = safeStr(globals.get("版本号"));
-
         cfgCdkObj = safeStr(globals.get("计分板"));
         cfgCyName = safeStr(globals.get("联控插件"));
         cfgLinkMode = safeStr(globals.get("联控模式"));
@@ -404,9 +447,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 e.decimalPlaces = safeInt(block.getOrDefault("_小数位", "-1"));
                 e.rawText = "经济盲盒 " + fmtMoney(e.moneyMin) + "~" + fmtMoney(e.moneyMax);
                 sa.actions.add(e);
-            }
-            // ===== 改动5: 联控盲盒 - 修正默认值逻辑, max默认等于min, 并加保护 =====
-            else if ("true".equals(block.get("_联控盲盒"))) {
+            } else if ("true".equals(block.get("_联控盲盒"))) {
                 ActionEntry e = new ActionEntry("联控盲盒");
                 e.daysMin = safeInt(block.getOrDefault("_天数min", "7"));
                 e.daysMax = safeInt(block.getOrDefault("_天数max", "90"));
@@ -423,8 +464,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 log("[配置] 联控盲盒范围: " + e.daysMin + "~" + e.daysMax + "天 "
                         + e.slotsMin + "~" + e.slotsMax + "格");
                 sa.actions.add(e);
-            }
-            else {
+            } else {
                 if (block.containsKey("_发钱")) {
                     ActionEntry e = new ActionEntry("发钱");
                     e.money = safeDouble(block.get("_发钱"));
@@ -462,28 +502,52 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private void parseNaturalAction(Map<String, String> block, String text, List<String> diag) {
         text = text.replaceAll("^['\"](.*)['\"]$", "$1").trim();
-        if (text.contains("删") || text.contains("删除") || text.contains("销毁")
-                || text.contains("作废") || text.contains("清除") || text.contains("清空")
-                || text.contains("抹除") || text.contains("删掉") || text.contains("移除")
-                || text.contains("废弃") || text.contains("失效") || text.contains("吊销")
-                || text.contains("注销") || text.contains("回收") || text.contains("用掉")
-                || text.contains("消耗") || text.contains("核销") || text.contains("废除")) {
+        text = normalizeText(text);
+        log("[SDF1-诊断-动作] 输入: [" + text + "]");
+        StringBuilder actionHex = new StringBuilder();
+        for (int i = 0; i < Math.min(60, text.length()); i++) {
+            actionHex.append(String.format("U+%04X ", (int) text.charAt(i)));
+        }
+        log("[SDF1-诊断-动作] 码点: " + actionHex.toString().trim());
+
+        text = text.replace('\uff0d', '-').replace('\u2013', '-').replace('\u2014', '-').replace('\uff5e', '~');
+
+        // ★ 在所有检测之前，先归一化数字格式
+        //   这样 "V千块-2万块" → "5000块-20000块"
+        //   确保 extractMoneyRange 和所有 contains 检查都能正确工作
+        String norm = normalizeAllDigits(text);
+        norm = normalizeEnglishNumbers(norm);
+        norm = normalizeRomanNumerals(norm);
+        norm = normalizeMixedNumbers(norm);
+        norm = normalizeChineseNumbers(norm);
+        log("[SDF1-诊断-动作] 归一化: [" + norm + "]");
+
+        // ★ 用归一化后的文本做所有检测
+        if (norm.contains("删") || norm.contains("删除") || norm.contains("销毁")
+                || norm.contains("作废") || norm.contains("清除") || norm.contains("清空")
+                || norm.contains("抹除") || norm.contains("删掉") || norm.contains("移除")
+                || norm.contains("废弃") || norm.contains("失效") || norm.contains("吊销")
+                || norm.contains("注销") || norm.contains("回收") || norm.contains("用掉")
+                || norm.contains("消耗") || norm.contains("核销") || norm.contains("废除")) {
             block.put("_删除口令", "true");
             diag.add("    -> 识别: 删除口令");
         }
-        if (text.contains("记名") || text.contains("永久一次性") || text.contains("记录")
-                || text.contains("标记已用") || text.contains("防重复") || text.contains("查重")
-                || text.contains("已领") || text.contains("已兑换") || text.contains("去重")) {
+        if (norm.contains("记名") || norm.contains("永久一次性") || norm.contains("记录")
+                || norm.contains("标记已用") || norm.contains("防重复") || norm.contains("查重")
+                || norm.contains("已领") || norm.contains("已兑换") || norm.contains("去重")) {
             block.put("_记名", "true");
             diag.add("    -> 识别: 记名");
         }
-        Matcher decMatch = Pattern.compile("(\\d+)\\s*位\\s*小数").matcher(text);
+        Matcher decMatch = Pattern.compile("(\\d+)\\s*位\\s*小数").matcher(norm);
         if (decMatch.find()) {
             block.put("_小数位", decMatch.group(1));
             diag.add("    -> 识别: 小数位=" + decMatch.group(1));
         }
-        if (text.contains("盲盒") || text.contains("抽")) {
-            double[] mr = extractMoneyRange(text);
+
+        // ★ 盲盒检测：用归一化后的文本
+        if (norm.contains("盲盒") || norm.contains("抽")) {
+            // 第一优先: 明确的金额范围 -> 经济盲盒
+            double[] mr = extractMoneyRange(norm);
             if (mr != null) {
                 block.put("_经济盲盒", "true");
                 block.put("_经济盲盒_min", String.valueOf(mr[0]));
@@ -491,7 +555,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 diag.add("    -> 识别: 经济盲盒 " + mr[0] + "~" + mr[1]);
                 return;
             }
-            int[] sr = extractSlotDayRange(text);
+            // 第二优先: 明确的天+格组合范围 -> 联控盲盒
+            int[] sr = extractSlotDayRange(norm);
             if (sr != null) {
                 block.put("_联控盲盒", "true");
                 block.put("_天数min", String.valueOf(sr[0]));
@@ -502,32 +567,48 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                         + " 格子=" + sr[1] + "~" + sr[3]);
                 return;
             }
-            // ===== 改动6: 无明确范围时, 尝试分别提取天数和格子的独立范围 =====
-            int[] dayRange = extractDayRange(text);
-            int[] slotRange = extractSlotRange(text);
-            if (dayRange != null || slotRange != null) {
+            // 第三优先: 独立的天数范围或格子范围 -> 联控盲盒
+            int[] dayR = extractDayRange(norm);
+            int[] slotR = extractSlotRange(norm);
+            if (dayR != null || slotR != null) {
                 block.put("_联控盲盒", "true");
-                if (dayRange != null) {
-                    block.put("_天数min", String.valueOf(dayRange[0]));
-                    block.put("_天数max", String.valueOf(dayRange[1]));
-                    diag.add("    -> 识别: 天数范围 " + dayRange[0] + "~" + dayRange[1]);
+                if (dayR != null) {
+                    block.put("_天数min", String.valueOf(dayR[0]));
+                    block.put("_天数max", String.valueOf(dayR[1]));
+                    diag.add("    -> 识别: 天数范围 " + dayR[0] + "~" + dayR[1]);
                 }
-                if (slotRange != null) {
-                    block.put("_格子min", String.valueOf(slotRange[0]));
-                    block.put("_格子max", String.valueOf(slotRange[1]));
-                    diag.add("    -> 识别: 格子范围 " + slotRange[0] + "~" + slotRange[1]);
+                if (slotR != null) {
+                    block.put("_格子min", String.valueOf(slotR[0]));
+                    block.put("_格子max", String.valueOf(slotR[1]));
+                    diag.add("    -> 识别: 格子范围 " + slotR[0] + "~" + slotR[1]);
                 }
                 return;
             }
-            block.put("_联控盲盒", "true");
-            diag.add("    -> 识别: 联控盲盒(默认范围)");
+            // 第四优先: 关键词判断
+            boolean hasCyKw = norm.contains("格") || norm.contains("天")
+                    || norm.contains("背包") || norm.contains("空间")
+                    || norm.contains("会员") || norm.contains("激活")
+                    || norm.contains("存储");
+            boolean hasMoneyKw = norm.contains("给") || norm.contains("钱")
+                    || norm.contains("块") || norm.contains("元")
+                    || norm.contains("奖") || norm.contains("金额")
+                    || norm.contains("金");
+            if (hasCyKw && !hasMoneyKw) {
+                block.put("_联控盲盒", "true");
+                diag.add("    -> 识别: 联控盲盒(联控关键词)");
+            } else {
+                block.put("_经济盲盒", "true");
+                diag.add("    -> 识别: 经济盲盒(默认)");
+            }
             return;
         }
-        boolean hasSlotKw = text.contains("背包") || text.contains("空间")
-                || text.contains("格") || text.contains("激活") || text.contains("会员")
-                || text.contains("存储");
+
+        // ★ 非盲盒路径也用归一化文本
+        boolean hasSlotKw = norm.contains("背包") || norm.contains("空间")
+                || norm.contains("格") || norm.contains("激活") || norm.contains("会员")
+                || norm.contains("存储");
         if (hasSlotKw) {
-            int[] sd = extractSlotDay(text);
+            int[] sd = extractSlotDay(norm);
             if (sd != null) {
                 block.put("_联控", "true");
                 block.put("_格子数", String.valueOf(sd[1]));
@@ -535,71 +616,25 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 diag.add("    -> 识别: 联控 " + sd[0] + "天" + sd[1] + "格");
             }
         }
-        boolean isTake = text.contains("扣") || text.contains("减") || text.contains("扣除")
-                || text.contains("罚") || text.contains("没收");
+        boolean isTake = norm.contains("扣") || norm.contains("减") || norm.contains("扣除")
+                || norm.contains("罚") || norm.contains("没收");
         if (isTake) {
-            double amt = extractMoneyExcludingSlots(text);
+            double amt = extractMoneyExcludingSlots(norm);
             if (amt > 0) {
                 block.put("_扣钱", String.valueOf(amt));
                 diag.add("    -> 识别: 扣钱 " + amt);
             }
         }
-        boolean isGive = !isTake && (text.contains("给") || text.contains("奖")
-                || text.contains("发") || text.contains("加") || text.contains("赏")
-                || text.contains("赠送") || text.contains("返"));
+        boolean isGive = !isTake && (norm.contains("给") || norm.contains("奖")
+                || norm.contains("发") || norm.contains("加") || norm.contains("赏")
+                || norm.contains("赠送") || norm.contains("返"));
         if (isGive) {
-            double amt = extractMoneyExcludingSlots(text);
+            double amt = extractMoneyExcludingSlots(norm);
             if (amt > 0) {
                 block.put("_发钱", String.valueOf(amt));
                 diag.add("    -> 识别: 发钱 " + amt);
             }
         }
-    }
-
-    // ===== 改动7: 新增独立天数范围提取 =====
-    private int[] extractDayRange(String text) {
-        // 格式: "X天~A天" 或 "X到A天"
-        Matcher m = Pattern.compile(
-                "(\\d+)\\s*天\\s*[~\\-到至]+\\s*(\\d+)\\s*天"
-        ).matcher(text);
-        if (m.find()) {
-            int a = Integer.parseInt(m.group(1));
-            int b = Integer.parseInt(m.group(2));
-            return new int[]{Math.min(a, b), Math.max(a, b)};
-        }
-        // 格式: "X~A天"
-        Matcher m2 = Pattern.compile(
-                "(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*天"
-        ).matcher(text);
-        if (m2.find()) {
-            int a = Integer.parseInt(m2.group(1));
-            int b = Integer.parseInt(m2.group(2));
-            return new int[]{Math.min(a, b), Math.max(a, b)};
-        }
-        return null;
-    }
-
-    // ===== 改动8: 新增独立格子范围提取 =====
-    private int[] extractSlotRange(String text) {
-        // 格式: "X格~A格" 或 "X到A格"
-        Matcher m = Pattern.compile(
-                "(\\d+)\\s*格\\s*[~\\-到至]+\\s*(\\d+)\\s*格"
-        ).matcher(text);
-        if (m.find()) {
-            int a = Integer.parseInt(m.group(1));
-            int b = Integer.parseInt(m.group(2));
-            return new int[]{Math.min(a, b), Math.max(a, b)};
-        }
-        // 格式: "X~A格"
-        Matcher m2 = Pattern.compile(
-                "(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*格"
-        ).matcher(text);
-        if (m2.find()) {
-            int a = Integer.parseInt(m2.group(1));
-            int b = Integer.parseInt(m2.group(2));
-            return new int[]{Math.min(a, b), Math.max(a, b)};
-        }
-        return null;
     }
 
     private String safeStr(String s) { return s == null ? "" : s.trim(); }
@@ -625,6 +660,212 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         return result + current;
     }
 
+    private String normalizeAllDigits(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= '\uFF10' && c <= '\uFF19') {
+                sb.append((char)(c - 0xFF10 + '0'));
+            } else if (c == '\uFF0E') {
+                sb.append('.');
+            } else {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private String normalizeMixedNumbers(String text) {
+        Matcher m1 = Pattern.compile("(\\d+)([万亿])(\\d+)?([千万百十])?").matcher(text);
+        StringBuffer sb1 = new StringBuffer();
+        while (m1.find()) {
+            int num = Integer.parseInt(m1.group(1));
+            Integer unit1 = CN_NUMS.get(m1.group(2));
+            long result = (long) num * (unit1 != null ? unit1 : 1);
+            if (m1.group(3) != null) {
+                int num2 = Integer.parseInt(m1.group(3));
+                Integer unit2 = CN_NUMS.get(m1.group(4));
+                result += (long) num2 * (unit2 != null ? unit2 : 1);
+            }
+            m1.appendReplacement(sb1, String.valueOf(result));
+        }
+        m1.appendTail(sb1);
+        Matcher m2 = Pattern.compile("(\\d+)([千万百十])").matcher(sb1.toString());
+        StringBuffer sb2 = new StringBuffer();
+        while (m2.find()) {
+            int num = Integer.parseInt(m2.group(1));
+            Integer unitVal = CN_NUMS.get(m2.group(2));
+            if (unitVal != null && unitVal > 0) {
+                m2.appendReplacement(sb2, String.valueOf(num * unitVal));
+            }
+        }
+        m2.appendTail(sb2);
+        return sb2.toString();
+    }
+
+    private String normalizeChineseNumbers(String text) {
+        Matcher m = Pattern.compile(
+                "[零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+"
+        ).matcher(text);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            int val = parseChineseNum(m.group());
+            if (val > 0) {
+                m.appendReplacement(sb, String.valueOf(val));
+            }
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String normalizeEnglishNumbers(String text) {
+        Matcher m = Pattern.compile(
+                "(?i)\\b(zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+                        + "eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+                        + "eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+                        + "eighty|ninety|hundred|thousand|million|billion)"
+                        + "(?:[\\s-]+(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+                        + "eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|"
+                        + "eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|"
+                        + "eighty|ninety|hundred|thousand|million|billion))*\\b"
+        ).matcher(text);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            int val = parseEnglishNum(m.group());
+            if (val > 0) {
+                m.appendReplacement(sb, String.valueOf(val));
+            }
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private String normalizeRomanNumerals(String text) {
+        Matcher m = Pattern.compile("(?i)\\b([IVXLCDM]+)\\b").matcher(text);
+        StringBuffer sb = new StringBuffer();
+        while (m.find()) {
+            String matched = m.group(1);
+            if (matched.isEmpty()) continue;
+            if (matched.matches("(?i)M{0,3}(?:CM|CD|D?C{0,3})(?:XC|XL|L?X{0,3})(?:IX|IV|V?I{0,3})")) {
+                int val = parseRomanNum(matched);
+                if (val > 0) {
+                    m.appendReplacement(sb, String.valueOf(val));
+                }
+            }
+        }
+        m.appendTail(sb);
+        return sb.toString();
+    }
+
+    private Charset detectEncoding(File f) {
+        try {
+            byte[] bytes = java.nio.file.Files.readAllBytes(f.toPath());
+            if (isValidUtf8(bytes)) return StandardCharsets.UTF_8;
+            log("[SDF1] 文件非UTF-8，使用GBK编码");
+        } catch (Exception e) {}
+        try { return Charset.forName("GBK"); } catch (Exception e) {}
+        return StandardCharsets.UTF_8;
+    }
+
+    private boolean isValidUtf8(byte[] bytes) {
+        int i = 0;
+        while (i < bytes.length) {
+            int b = bytes[i] & 0xFF;
+            if (b <= 0x7F) { i++; continue; }
+            int len;
+            if ((b & 0xE0) == 0xC0) len = 2;
+            else if ((b & 0xF0) == 0xE0) len = 3;
+            else if ((b & 0xF8) == 0xF0) len = 4;
+            else return false;
+            for (int j = 1; j < len; j++) {
+                if (i + j >= bytes.length) return false;
+                if ((bytes[i + j] & 0xC0) != 0x80) return false;
+            }
+            i += len;
+        }
+        return true;
+    }
+
+    private String normalizeText(String s) {
+        if (s == null) return "";
+        return s.replace('\uff0d', '-').replace('\u2013', '-').replace('\u2014', '-')
+                .replace('\u2212', '-').replace('\uff5e', '~')
+                .replace("\u200b", "").replace("\ufeff", "");
+    }
+
+    private int parseChineseNum(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        s = s.trim();
+        try { return Integer.parseInt(s); } catch (Exception e) {}
+        int result = 0, section = 0, current = 0;
+        for (int i = 0; i < s.length(); i++) {
+            Integer val = CN_NUMS.get(s.substring(i, i + 1));
+            if (val == null) continue;
+            if (val >= 100000000) {
+                result = (result + section + current) * val;
+                section = 0; current = 0;
+            } else if (val >= 10000) {
+                section = (section + current) * val;
+                current = 0;
+            } else if (val >= 10) {
+                if (current == 0) current = 1;
+                current *= val;
+            } else {
+                if (current > 0 && current >= 10) {
+                    section += current;
+                    current = val;
+                } else {
+                    current = val;
+                }
+            }
+        }
+        return result + section + current;
+    }
+
+    private int parseRomanNum(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        s = s.toUpperCase().trim();
+        Map<Character, Integer> v = new HashMap<Character, Integer>();
+        v.put('I', 1); v.put('V', 5); v.put('X', 10); v.put('L', 50);
+        v.put('C', 100); v.put('D', 500); v.put('M', 1000);
+        int result = 0;
+        for (int i = 0; i < s.length(); i++) {
+            Integer cur = v.get(s.charAt(i));
+            if (cur == null) return 0;
+            Integer nxt = (i + 1 < s.length()) ? v.get(s.charAt(i + 1)) : null;
+            if (nxt != null && cur < nxt) result -= cur;
+            else result += cur;
+        }
+        return result;
+    }
+
+    private int parseEnglishNum(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        s = s.toLowerCase().trim().replaceAll("[\\s-]+", " ");
+        Map<String, Integer> w = new HashMap<String, Integer>();
+        w.put("zero",0); w.put("one",1); w.put("two",2); w.put("three",3);
+        w.put("four",4); w.put("five",5); w.put("six",6); w.put("seven",7);
+        w.put("eight",8); w.put("nine",9); w.put("ten",10);
+        w.put("eleven",11); w.put("twelve",12); w.put("thirteen",13);
+        w.put("fourteen",14); w.put("fifteen",15); w.put("sixteen",16);
+        w.put("seventeen",17); w.put("eighteen",18); w.put("nineteen",19);
+        w.put("twenty",20); w.put("thirty",30); w.put("forty",40);
+        w.put("fifty",50); w.put("sixty",60); w.put("seventy",70);
+        w.put("eighty",80); w.put("ninety",90);
+        w.put("hundred",100); w.put("thousand",1000);
+        w.put("million",1000000); w.put("billion",1000000000);
+        int result = 0, current = 0;
+        for (String word : s.split(" ")) {
+            Integer val = w.get(word);
+            if (val == null) continue;
+            if (val >= 1000) { result = (result + current) * val; current = 0; }
+            else if (val >= 100) { current = (current == 0 ? 1 : current) * val; }
+            else { current += val; }
+        }
+        return result + current;
+    }
+
     private double safeDouble(String s) {
         try { return Double.parseDouble(s == null ? "0" : s.trim()); }
         catch (Exception e) { return safeInt(s); }
@@ -640,8 +881,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private int findUnquoted(String s, char target) {
-        boolean inSq = false;
-        boolean inDq = false;
+        boolean inSq = false; boolean inDq = false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c == '\'' && !inDq) inSq = !inSq;
@@ -714,10 +954,23 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private double[] extractMoneyRange(String text) {
+        text = normalizeText(text);
+        text = normalizeAllDigits(text);
+        text = normalizeEnglishNumbers(text);
+        text = normalizeRomanNumerals(text);
+        text = normalizeMixedNumbers(text);
+        text = normalizeChineseNumbers(text);
         Matcher m = Pattern.compile(
-                "([\\d.]+)\\s*(元|块|千|万|十万|百万)?\\s*[~\\-到至]+\\s*([\\d.]+)\\s*(元|块|千|万|十万|百万)?"
+                "([\\d.]+)\\s*(元|块|千|万|十万|百万)?"
+                        + "\\s*[~\\-到至]+\\s*"
+                        + "([\\d.]+)\\s*(元|块|千|万|十万|百万)?"
         ).matcher(text);
         if (m.find()) {
+            if (m.end() < text.length()) {
+                String after = text.substring(m.end()).trim();
+                if (after.startsWith("天") || after.startsWith("格"))
+                    return null;
+            }
             double min = parseMoneyWithUnit(m.group(1), m.group(2));
             double max = parseMoneyWithUnit(m.group(3), m.group(4));
             if (min > 0 && max > 0) {
@@ -728,6 +981,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         return null;
     }
 
+    // ★ 修复：中文数字归一化后再匹配金额
     private double extractMoneyExcludingSlots(String text) {
         String[] parts = text.split("[，,、；;。]");
         double max = 0;
@@ -735,6 +989,11 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             part = part.trim();
             if (part.contains("格") || part.contains("天") || part.contains("空间")
                     || part.contains("背包") || part.contains("激活")) continue;
+            part = normalizeAllDigits(part);
+            part = normalizeEnglishNumbers(part);
+            part = normalizeRomanNumerals(part);
+            part = normalizeMixedNumbers(part);
+            part = normalizeChineseNumbers(part);
             double[] range = extractMoneyRange(part);
             if (range != null) {
                 double avg = (range[0] + range[1]) / 2;
@@ -752,11 +1011,9 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private int[] extractSlotDay(String text) {
         Matcher m1 = Pattern.compile("(\\d+)\\s*格.*?(\\d+)\\s*天").matcher(text);
-        if (m1.find()) return new int[]{
-                Integer.parseInt(m1.group(2)), Integer.parseInt(m1.group(1))};
+        if (m1.find()) return new int[]{Integer.parseInt(m1.group(2)), Integer.parseInt(m1.group(1))};
         Matcher m2 = Pattern.compile("(\\d+)\\s*天.*?(\\d+)\\s*格").matcher(text);
-        if (m2.find()) return new int[]{
-                Integer.parseInt(m2.group(1)), Integer.parseInt(m2.group(2))};
+        if (m2.find()) return new int[]{Integer.parseInt(m2.group(1)), Integer.parseInt(m2.group(2))};
         Matcher m3 = Pattern.compile("(\\d+)\\s*格").matcher(text);
         if (m3.find()) return new int[]{0, Integer.parseInt(m3.group(1))};
         Matcher m4 = Pattern.compile("(\\d+)\\s*天").matcher(text);
@@ -774,107 +1031,90 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         return null;
     }
 
+    private int[] extractDayRange(String text) {
+        Matcher m = Pattern.compile("(\\d+)\\s*天\\s*[~\\-到至]+\\s*(\\d+)\\s*天").matcher(text);
+        if (m.find()) {
+            int a = Integer.parseInt(m.group(1)); int b = Integer.parseInt(m.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        Matcher m2 = Pattern.compile("(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*天").matcher(text);
+        if (m2.find()) {
+            int a = Integer.parseInt(m2.group(1)); int b = Integer.parseInt(m2.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        return null;
+    }
+
+    private int[] extractSlotRange(String text) {
+        Matcher m = Pattern.compile("(\\d+)\\s*格\\s*[~\\-到至]+\\s*(\\d+)\\s*格").matcher(text);
+        if (m.find()) {
+            int a = Integer.parseInt(m.group(1)); int b = Integer.parseInt(m.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        Matcher m2 = Pattern.compile("(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*格").matcher(text);
+        if (m2.find()) {
+            int a = Integer.parseInt(m2.group(1)); int b = Integer.parseInt(m2.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        return null;
+    }
+
     private List<String> stripAllComments(List<String> rawLines, List<String> diag) {
         List<String> result = new ArrayList<String>();
-        boolean inBlock = false;
-        boolean inHtml = false;
-        int totalComments = 0;
-        int totalInline = 0;
+        boolean inBlock = false; boolean inHtml = false;
+        int totalComments = 0; int totalInline = 0;
         diag.add("===== 逐行诊断 =====");
         diag.add("总行数: " + rawLines.size());
         for (int i = 0; i < rawLines.size(); i++) {
             String raw = rawLines.get(i);
             String trimmed = raw.trim();
             String ln = String.format("L%02d", i + 1);
-            if (trimmed.isEmpty()) {
-                diag.add(ln + ": (空行)"); result.add(""); continue;
-            }
+            if (trimmed.isEmpty()) { diag.add(ln + ": (空行)"); result.add(""); continue; }
             if (inBlock) {
                 int endIdx = trimmed.indexOf("*/");
-                if (endIdx >= 0) {
-                    inBlock = false;
-                    String after = trimmed.substring(endIdx + 2).trim();
-                    result.add(after.isEmpty() ? "" : after);
-                } else { result.add(""); }
-                diag.add(ln + ": [踢除块注释中]");
-                totalComments++; continue;
+                if (endIdx >= 0) { inBlock = false; String after = trimmed.substring(endIdx + 2).trim(); result.add(after.isEmpty() ? "" : after); }
+                else { result.add(""); }
+                diag.add(ln + ": [踢除块注释中]"); totalComments++; continue;
             }
             if (inHtml) {
                 int endIdx = trimmed.indexOf("-->");
-                if (endIdx >= 0) {
-                    inHtml = false;
-                    String after = trimmed.substring(endIdx + 3).trim();
-                    result.add(after.isEmpty() ? "" : after);
-                } else { result.add(""); }
-                diag.add(ln + ": [踢除HTML注释中]");
-                totalComments++; continue;
+                if (endIdx >= 0) { inHtml = false; String after = trimmed.substring(endIdx + 3).trim(); result.add(after.isEmpty() ? "" : after); }
+                else { result.add(""); }
+                diag.add(ln + ": [踢除HTML注释中]"); totalComments++; continue;
             }
             if (trimmed.contains("/*")) {
-                int bs = trimmed.indexOf("/*");
-                int be = trimmed.indexOf("*/", bs + 2);
-                if (be >= 0) {
-                    String b = trimmed.substring(0, bs).trim();
-                    String a = trimmed.substring(be + 2).trim();
-                    result.add((b + " " + a).trim());
-                } else {
-                    inBlock = true;
-                    String b = trimmed.substring(0, bs).trim();
-                    result.add(b.isEmpty() ? "" : b);
-                }
-                diag.add(ln + ": [踢除块注释]");
-                totalComments++; continue;
+                int bs = trimmed.indexOf("/*"); int be = trimmed.indexOf("*/", bs + 2);
+                if (be >= 0) { String b = trimmed.substring(0, bs).trim(); String a = trimmed.substring(be + 2).trim(); result.add((b + " " + a).trim()); }
+                else { inBlock = true; String b = trimmed.substring(0, bs).trim(); result.add(b.isEmpty() ? "" : b); }
+                diag.add(ln + ": [踢除块注释]"); totalComments++; continue;
             }
             if (trimmed.contains("<!--")) {
-                int hs = trimmed.indexOf("<!--");
-                int he = trimmed.indexOf("-->", hs + 4);
-                if (he >= 0) {
-                    inHtml = false;
-                    String b = trimmed.substring(0, hs).trim();
-                    String a = trimmed.substring(he + 3).trim();
-                    result.add((b + " " + a).trim());
-                } else {
-                    inHtml = true;
-                    String b = trimmed.substring(0, hs).trim();
-                    result.add(b.isEmpty() ? "" : b);
-                }
-                diag.add(ln + ": [踢除HTML注释]");
-                totalComments++; continue;
+                int hs = trimmed.indexOf("<!--"); int he = trimmed.indexOf("-->", hs + 4);
+                if (he >= 0) { inHtml = false; String b = trimmed.substring(0, hs).trim(); String a = trimmed.substring(he + 3).trim(); result.add((b + " " + a).trim()); }
+                else { inHtml = true; String b = trimmed.substring(0, hs).trim(); result.add(b.isEmpty() ? "" : b); }
+                diag.add(ln + ": [踢除HTML注释]"); totalComments++; continue;
             }
             if (trimmed.startsWith("#") || trimmed.startsWith("//")) {
-                diag.add(ln + ": [踢除整行注释]");
-                result.add(""); totalComments++; continue;
+                diag.add(ln + ": [踢除整行注释]"); result.add(""); totalComments++; continue;
             }
             int hashIdx = findUnquoted(trimmed, '#');
-            if (hashIdx >= 0) {
-                trimmed = trimmed.substring(0, hashIdx).trim();
-                totalInline++;
-            }
+            if (hashIdx >= 0) { trimmed = trimmed.substring(0, hashIdx).trim(); totalInline++; }
             int slashIdx = findUnquoted(trimmed, '/');
-            if (slashIdx >= 0 && slashIdx + 1 < trimmed.length()
-                    && trimmed.charAt(slashIdx + 1) == '/') {
-                trimmed = trimmed.substring(0, slashIdx).trim();
-                totalInline++;
+            if (slashIdx >= 0 && slashIdx + 1 < trimmed.length() && trimmed.charAt(slashIdx + 1) == '/') {
+                trimmed = trimmed.substring(0, slashIdx).trim(); totalInline++;
             }
             diag.add(ln + ": [保留] \"" + trimmed + "\"");
             result.add(trimmed);
         }
-        diag.add("总行: " + rawLines.size() + " | 注释: " + totalComments
-                + " | 有效行: " + result.size());
+        diag.add("总行: " + rawLines.size() + " | 注释: " + totalComments + " | 有效行: " + result.size());
         return result;
     }
 
     private void setupEconomy() {
-        if (getServer().getPluginManager().getPlugin("Vault") == null) {
-            log("[Vault] 未找到"); return;
-        }
-        RegisteredServiceProvider<Economy> rsp =
-                getServer().getServicesManager().getRegistration(Economy.class);
-        if (rsp != null) {
-            economy = rsp.getProvider();
-            log("[Vault] 已连接: " + economy.getName());
-        } else {
-            log("[Vault] 未找到经济提供者");
-        }
+        if (getServer().getPluginManager().getPlugin("Vault") == null) { log("[Vault] 未找到"); return; }
+        RegisteredServiceProvider<Economy> rsp = getServer().getServicesManager().getRegistration(Economy.class);
+        if (rsp != null) { economy = rsp.getProvider(); log("[Vault] 已连接: " + economy.getName()); }
+        else { log("[Vault] 未找到经济提供者"); }
     }
 
     private int lookupScore(String code) {
@@ -882,13 +1122,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         try {
             Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
             Objective obj = board.getObjective(cfgCdkObj);
-            if (obj == null) {
-                if (!cdksWarned) {
-                    log("[计分板] 找不到: " + cfgCdkObj);
-                    cdksWarned = true;
-                }
-                return -1;
-            }
+            if (obj == null) { if (!cdksWarned) { log("[计分板] 找不到: " + cfgCdkObj); cdksWarned = true; } return -1; }
             cdksWarned = false;
             Score s = obj.getScore(code);
             if (!s.isScoreSet()) return -1;
@@ -906,30 +1140,13 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 Score sc = obj.getScore(code);
                 if (sc.isScoreSet()) {
                     boolean removed = false;
-                    try {
-                        java.lang.reflect.Method m = obj.getClass()
-                                .getMethod("resetScore", String.class);
-                        m.invoke(obj, code);
-                        removed = true;
-                    } catch (Throwable ignored) {}
-                    if (!removed) {
-                        try {
-                            java.lang.reflect.Method m = board.getClass()
-                                    .getMethod("resetScore", String.class);
-                            m.invoke(board, code);
-                            removed = true;
-                        } catch (Throwable ignored) {}
-                    }
-                    if (!removed) {
-                        sc.setScore(Integer.MIN_VALUE);
-                        removed = true;
-                    }
+                    try { java.lang.reflect.Method m = obj.getClass().getMethod("resetScore", String.class); m.invoke(obj, code); removed = true; } catch (Throwable ignored) {}
+                    if (!removed) try { java.lang.reflect.Method m = board.getClass().getMethod("resetScore", String.class); m.invoke(board, code); removed = true; } catch (Throwable ignored) {}
+                    if (!removed) { sc.setScore(Integer.MIN_VALUE); removed = true; }
                     log("[删除] API结果: " + removed);
                 }
             }
-        } catch (Exception e) {
-            log("[删除] API异常: " + e.getMessage());
-        }
+        } catch (Exception e) { log("[删除] API异常: " + e.getMessage()); }
         fallbackDelete(code);
     }
 
@@ -939,11 +1156,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 String safeCode = code.replace("\"", "\\\"");
                 String cmd = "scoreboard players reset " + safeCode + " " + cfgCdkObj;
                 log("[删除] 兜底: " + cmd);
-                try {
-                    Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd);
-                } catch (Exception e) {
-                    log("[删除] 兜底失败: " + e.getMessage());
-                }
+                try { Bukkit.dispatchCommand(Bukkit.getConsoleSender(), cmd); }
+                catch (Exception e) { log("[删除] 兜底失败: " + e.getMessage()); }
             }
         });
     }
@@ -953,90 +1167,62 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         if (s.hasPermission("sdf1.admin")) return true;
         if (!(s instanceof Player)) return false;
         Player p = (Player) s;
-        if (!cfgAdminTag.isEmpty()
-                && p.getScoreboardTags().contains(cfgAdminTag)) return true;
+        if (!cfgAdminTag.isEmpty() && p.getScoreboardTags().contains(cfgAdminTag)) return true;
         if (!cfgAdminTeam.isEmpty()) {
-            try {
-                org.bukkit.scoreboard.Team team =
-                        p.getScoreboard().getTeam(cfgAdminTeam);
-                if (team != null && team.hasEntry(p.getName())) return true;
-            } catch (Exception ignored) {}
+            try { org.bukkit.scoreboard.Team team = p.getScoreboard().getTeam(cfgAdminTeam); if (team != null && team.hasEntry(p.getName())) return true; } catch (Exception ignored) {}
         }
         return false;
     }
-
     private void startListening(Player p) {
         listening.put(p.getUniqueId(), System.currentTimeMillis());
         p.sendMessage(colorize("&a[SDF1] &f已开启口令监听 (15秒)"));
+        final UUID uuid = p.getUniqueId();
+        Bukkit.getScheduler().runTaskLater(this, new Runnable() {
+            public void run() {
+                if (listening.containsKey(uuid)) {
+                    stopListening(uuid, false);
+                }
+            }
+        }, 300L);
     }
+
 
     private void stopListening(UUID uuid, boolean silent) {
         listening.remove(uuid);
-        if (!silent) {
-            Player pl = Bukkit.getPlayer(uuid);
-            if (pl != null && pl.isOnline())
-                pl.sendMessage(colorize("&e[SDF1] 监听已关闭"));
-        }
+        if (!silent) { Player pl = Bukkit.getPlayer(uuid); if (pl != null && pl.isOnline()) pl.sendMessage(colorize("&e[SDF1] 监听已关闭")); }
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerChat(AsyncPlayerChatEvent event) {
-        Player p = event.getPlayer();
-        UUID u = p.getUniqueId();
-        String msg = event.getMessage().trim();
+        Player p = event.getPlayer(); UUID u = p.getUniqueId(); String msg = event.getMessage().trim();
         if (msg.isEmpty() || !listening.containsKey(u)) return;
-        event.setCancelled(true);
-        stopListening(u, true);
+        event.setCancelled(true); stopListening(u, true);
         p.sendMessage(colorize("&a[SDF1] &f已拦截，比对中..."));
         Long last = chatCd.get(u);
         if (last != null && System.currentTimeMillis() - last < 500) return;
         chatCd.put(u, System.currentTimeMillis());
         int scoreVal = lookupScore(msg);
-        if (scoreVal < 0) {
-            p.sendMessage(colorize("&c[SDF1] 口令无效"));
-            log("[拦截] " + p.getName() + " 无效: \"" + msg + "\"");
-            return;
-        }
+        if (scoreVal < 0) { p.sendMessage(colorize("&c[SDF1] 口令无效")); log("[拦截] " + p.getName() + " 无效: \"" + msg + "\""); return; }
         ScoreAction sa = scoreMap.get(scoreVal);
-        if (sa == null) {
-            p.sendMessage(colorize("&c[SDF1] 规则未配置"));
-            log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 无规则");
-            return;
-        }
-        log("[拦截] " + p.getName() + " 分值=" + scoreVal
-                + " 动作数=" + sa.actions.size()
-                + (sa.recordName ? " 记名" : "")
-                + (sa.deleteCode ? " 删口令" : ""));
+        if (sa == null) { p.sendMessage(colorize("&c[SDF1] 规则未配置")); log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 无规则"); return; }
+        log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 动作数=" + sa.actions.size() + (sa.recordName ? " 记名" : "") + (sa.deleteCode ? " 删口令" : ""));
         if (sa.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
             String nameKey = msg + "_" + p.getName();
             try {
                 Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
                 Objective nameObj = board.getObjective(cfgNameBoard);
-                if (nameObj != null) {
-                    Score ns = nameObj.getScore(nameKey);
-                    if (ns.isScoreSet() && ns.getScore() > 0) {
-                        p.sendMessage(colorize("&c[SDF1] 你已领取过此口令"));
-                        log("[记名] " + p.getName() + " 重复: " + nameKey);
-                        return;
-                    }
-                }
+                if (nameObj != null) { Score ns = nameObj.getScore(nameKey); if (ns.isScoreSet() && ns.getScore() > 0) { p.sendMessage(colorize("&c[SDF1] 你已领取过此口令")); log("[记名] " + p.getName() + " 重复: " + nameKey); return; } }
             } catch (Exception ignored) {}
         }
         p.sendMessage(colorize("&a[SDF1] 执行: " + sa.actions.size() + "个动作"));
         for (ActionEntry ae : sa.actions) {
             log("[执行] [" + ae.type + "] " + ae.rawText);
-            if ("发钱".equals(ae.type))
-                execGiveMoney(p, ae, sa.deleteCode, msg);
-            else if ("扣钱".equals(ae.type))
-                execTakeMoney(p, ae, sa.deleteCode, msg);
-            else if ("经济盲盒".equals(ae.type))
-                execMoneyBox(p, ae, sa.deleteCode, msg);
-            else if ("联控盲盒".equals(ae.type))
-                execSlotBox(p, ae, sa.deleteCode, msg);
-            else if ("联控".equals(ae.type))
-                execCy(p, ae, sa.deleteCode, msg);
-            else if ("删除口令".equals(ae.type))
-                execDelete(p, ae, msg);
+            if ("发钱".equals(ae.type)) execGiveMoney(p, ae, sa.deleteCode, msg);
+            else if ("扣钱".equals(ae.type)) execTakeMoney(p, ae, sa.deleteCode, msg);
+            else if ("经济盲盒".equals(ae.type)) execMoneyBox(p, ae, sa.deleteCode, msg);
+            else if ("联控盲盒".equals(ae.type)) execSlotBox(p, ae, sa.deleteCode, msg);
+            else if ("联控".equals(ae.type)) execCy(p, ae, sa.deleteCode, msg);
+            else if ("删除口令".equals(ae.type)) execDelete(p, ae, msg);
         }
         if (sa.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
             final String nameKey = msg + "_" + p.getName();
@@ -1045,30 +1231,20 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             Bukkit.getScheduler().runTask(this, new Runnable() {
                 public void run() {
                     try {
-                        Scoreboard board = Bukkit.getScoreboardManager()
-                                .getMainScoreboard();
+                        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
                         Objective obj = board.getObjective(boardName);
-                        if (obj == null) {
-                            log("[记名] 记名板不存在: " + boardName);
-                            fp.sendMessage(colorize(
-                                    "&c[SDF1] 记名板不存在，记名失败"));
-                            return;
-                        }
+                        if (obj == null) { log("[记名] 记名板不存在: " + boardName); fp.sendMessage(colorize("&c[SDF1] 记名板不存在，记名失败")); return; }
                         obj.getScore(nameKey).setScore(1);
                         log("[记名] 写入: " + nameKey);
                         fp.sendMessage(colorize("&a[SDF1] 记名成功"));
-                    } catch (Exception e) {
-                        log("[记名] 写入失败: " + e.getMessage());
-                    }
+                    } catch (Exception e) { log("[记名] 写入失败: " + e.getMessage()); }
                 }
             });
         }
     }
 
     private void execGiveMoney(Player p, ActionEntry a, boolean deleteCode, String code) {
-        if (economy == null) {
-            p.sendMessage(colorize("&c[SDF1] 经济不可用")); return;
-        }
+        if (economy == null) { p.sendMessage(colorize("&c[SDF1] 经济不可用")); return; }
         double before = economy.getBalance(p);
         economy.depositPlayer(p, a.money);
         double after = economy.getBalance(p);
@@ -1078,15 +1254,9 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private void execTakeMoney(Player p, ActionEntry a, boolean deleteCode, String code) {
-        if (economy == null) {
-            p.sendMessage(colorize("&c[SDF1] 经济不可用")); return;
-        }
+        if (economy == null) { p.sendMessage(colorize("&c[SDF1] 经济不可用")); return; }
         double amount = Math.abs(a.money);
-        if (!economy.has(p, amount)) {
-            p.sendMessage(colorize("&c[SDF1] 余额不足! 需要: $"
-                    + fmtAmount(amount, a.decimalPlaces)));
-            return;
-        }
+        if (!economy.has(p, amount)) { p.sendMessage(colorize("&c[SDF1] 余额不足! 需要: $" + fmtAmount(amount, a.decimalPlaces))); return; }
         double before = economy.getBalance(p);
         economy.withdrawPlayer(p, amount);
         double after = economy.getBalance(p);
@@ -1095,102 +1265,60 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         p.sendMessage(colorize("&7余额: &a$" + fmtMoney(before) + " &7-> &a$" + fmtMoney(after)));
     }
 
-    private void execMoneyBox(final Player p, final ActionEntry a,
-                              final boolean deleteCode, final String code) {
-        if (economy == null) {
-            p.sendMessage(colorize("&c[SDF1] 经济不可用")); return;
-        }
+    private void execMoneyBox(final Player p, final ActionEntry a, final boolean deleteCode, final String code) {
+        if (economy == null) { p.sendMessage(colorize("&c[SDF1] 经济不可用")); return; }
         p.sendMessage(colorize("&6&l[SDF1] &e&l盲盒开启中..."));
-        Bukkit.getScheduler().runTaskLater(this, new Runnable() {
-            public void run() {
-                p.sendMessage(colorize("&6&l[SDF1] &e&l正在摇晃盲盒..."));
-                Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() {
-                    public void run() {
-                        p.sendMessage(colorize("&6&l[SDF1] &e&l即将揭晓..."));
-                        Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() {
-                            public void run() {
-                                double amount = a.moneyMin
-                                        + rng.nextDouble() * (a.moneyMax - a.moneyMin);
-                                amount = Math.round(amount * 100.0) / 100.0;
-                                double before = economy.getBalance(p);
-                                economy.depositPlayer(p, amount);
-                                double after = economy.getBalance(p);
-                                consumeCode(code, deleteCode);
-                                p.sendMessage(colorize("&6&l[SDF1] &e&l恭喜！获得 $&c&l"
-                                        + fmtAmount(amount, a.decimalPlaces) + " &e&l！"));
-                                p.sendMessage(colorize("&7余额: &a$" + fmtMoney(before)
-                                        + " &7-> &a$" + fmtMoney(after)));
-                            }
-                        }, 20L);
-                    }
-                }, 20L);
-            }
-        }, 20L);
+        Bukkit.getScheduler().runTaskLater(this, new Runnable() { public void run() {
+            p.sendMessage(colorize("&6&l[SDF1] &e&l正在摇晃盲盒..."));
+            Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() { public void run() {
+                p.sendMessage(colorize("&6&l[SDF1] &e&l即将揭晓..."));
+                Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() { public void run() {
+                    double amount = a.moneyMin + rng.nextDouble() * (a.moneyMax - a.moneyMin);
+                    amount = Math.round(amount * 100.0) / 100.0;
+                    double before = economy.getBalance(p); economy.depositPlayer(p, amount); double after = economy.getBalance(p);
+                    consumeCode(code, deleteCode);
+                    p.sendMessage(colorize("&6&l[SDF1] &e&l恭喜！获得 $&c&l" + fmtAmount(amount, a.decimalPlaces) + " &e&l！"));
+                    p.sendMessage(colorize("&7余额: &a$" + fmtMoney(before) + " &7-> &a$" + fmtMoney(after)));
+                }}, 20L);
+            }}, 20L);
+        }}, 20L);
     }
 
-    // ===== 改动9: 联控盲盒执行 - 修正随机逻辑 + 增加日志 =====
-    private void execSlotBox(final Player p, final ActionEntry a,
-                             final boolean deleteCode, final String code) {
-        log("[联控盲盒] 玩家=" + p.getName()
-                + " 天数范围=" + a.daysMin + "~" + a.daysMax
-                + " 格子范围=" + a.slotsMin + "~" + a.slotsMax);
+    private void execSlotBox(final Player p, final ActionEntry a, final boolean deleteCode, final String code) {
+        log("[联控盲盒] 玩家=" + p.getName() + " 天数范围=" + a.daysMin + "~" + a.daysMax + " 格子范围=" + a.slotsMin + "~" + a.slotsMax);
         p.sendMessage(colorize("&6&l[SDF1] &e&l盲盒开启中..."));
-        Bukkit.getScheduler().runTaskLater(this, new Runnable() {
-            public void run() {
-                p.sendMessage(colorize("&6&l[SDF1] &e&l正在摇晃盲盒..."));
-                Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() {
-                    public void run() {
-                        p.sendMessage(colorize("&6&l[SDF1] &e&l即将揭晓..."));
-                        Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() {
-                            public void run() {
-                                int dayRange = Math.max(0, a.daysMax - a.daysMin);
-                                int slotRange = Math.max(0, a.slotsMax - a.slotsMin);
-                                int rd = a.daysMin + (dayRange > 0
-                                        ? rng.nextInt(dayRange + 1) : 0);
-                                int rs = a.slotsMin + (slotRange > 0
-                                        ? rng.nextInt(slotRange + 1) : 0);
-                                log("[联控盲盒] 随机结果: " + rd + "天 "
-                                        + rs + "格");
-                                if (tryCyActivate(p, rs, rd)) {
-                                    consumeCode(code, deleteCode);
-                                    p.sendMessage(colorize("&6&l[SDF1] &e&l恭喜！获得 &c&l"
-                                            + rd + "天会员 + " + rs + "格空间 &e&l！"));
-                                } else {
-                                    p.sendMessage(colorize(
-                                            "&c[SDF1] 联控连接失败，盲盒作废"));
-                                }
-                            }
-                        }, 20L);
+        Bukkit.getScheduler().runTaskLater(this, new Runnable() { public void run() {
+            p.sendMessage(colorize("&6&l[SDF1] &e&l正在摇晃盲盒..."));
+            Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() { public void run() {
+                p.sendMessage(colorize("&6&l[SDF1] &e&l即将揭晓..."));
+                Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() { public void run() {
+                    int dayRange = Math.max(0, a.daysMax - a.daysMin);
+                    int slotRange = Math.max(0, a.slotsMax - a.slotsMin);
+                    int rd = a.daysMin + (dayRange > 0 ? rng.nextInt(dayRange + 1) : 0);
+                    int rs = a.slotsMin + (slotRange > 0 ? rng.nextInt(slotRange + 1) : 0);
+                    log("[联控盲盒] 随机结果: " + rd + "天 " + rs + "格");
+                    if (tryCyActivate(p, rs, rd)) {
+                        consumeCode(code, deleteCode);
+                        p.sendMessage(colorize("&6&l[SDF1] &e&l恭喜！获得 &c&l" + rd + "天会员 + " + rs + "格空间 &e&l！"));
+                    } else {
+                        p.sendMessage(colorize("&c[SDF1] 联控连接失败，盲盒作废"));
                     }
-                }, 20L);
-            }
-        }, 20L);
+                }}, 20L);
+            }}, 20L);
+        }}, 20L);
     }
 
     private void execCy(Player p, ActionEntry a, boolean deleteCode, String code) {
         if (tryCyActivate(p, a.slots, a.days)) {
             consumeCode(code, deleteCode);
-            p.sendMessage(colorize("&a[SDF1] 激活: " + a.slots + "格 "
-                    + (a.days > 0 ? a.days + "天" : "永久")));
+            p.sendMessage(colorize("&a[SDF1] 激活: " + a.slots + "格 " + (a.days > 0 ? a.days + "天" : "永久")));
         }
     }
 
     private boolean tryCyActivate(Player p, int slots, int days) {
-        if (!isCyConnected()) {
-            discoverCyPlugin();
-            if (!isCyConnected()) {
-                p.sendMessage(colorize("&c[SDF1] 联控未连接，跳过"));
-                return false;
-            }
-        }
-        try {
-            discoveredCyActivate.invoke(discoveredCy, p.getName(), slots, days);
-            return true;
-        } catch (Exception e) {
-            p.sendMessage(colorize("&c[SDF1] 联控失败"));
-            log("[联控] 失败: " + e.getMessage());
-            return false;
-        }
+        if (!isCyConnected()) { discoverCyPlugin(); if (!isCyConnected()) { p.sendMessage(colorize("&c[SDF1] 联控未连接，跳过")); return false; } }
+        try { discoveredCyActivate.invoke(discoveredCy, p.getName(), slots, days); return true; }
+        catch (Exception e) { p.sendMessage(colorize("&c[SDF1] 联控失败")); log("[联控] 失败: " + e.getMessage()); return false; }
     }
 
     private void execDelete(Player p, ActionEntry a, String code) {
@@ -1198,29 +1326,19 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         consumeCode(code, true);
     }
 
+    // ★ 修改：权限不足直接返回帮助，不报"权限不足"
     @Override
     public boolean onCommand(CommandSender s, Command c, String l, String[] a) {
         if (c.getName().equalsIgnoreCase("import")) {
-            if (!checkAdminSilent(s)) {
-                s.sendMessage(colorize("&c[SDF1] 权限不足"));
-                return true;
-            }
-            if (a.length < 1) {
-                s.sendMessage(colorize("&c用法: /import <文件名.txt>"));
-                return true;
-            }
+            if (!checkAdminSilent(s)) { showHelp(s); return true; }
+            if (a.length < 1) { s.sendMessage(colorize("&c用法: /import <文件名.txt>")); return true; }
             execImport(s, a[0]);
             return true;
         }
         if (a.length == 0) {
             if (s instanceof Player) {
                 Player p = (Player) s;
-                if (!configLoaded) {
-                    p.sendMessage(colorize("&c未加载")); return true;
-                }
-                if (cfgCdkObj.isEmpty()) {
-                    p.sendMessage(colorize("&c未配置")); return true;
-                }
+                if (!configLoaded || cfgCdkObj.isEmpty()) { showHelp(s); return true; }
                 startListening(p);
             } else {
                 showHelp(s);
@@ -1229,54 +1347,35 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         }
         String sub = a[0].toLowerCase();
         if (sub.equals("listen")) {
-            if (!(s instanceof Player)) {
-                s.sendMessage(colorize("&c仅玩家")); return true;
-            }
+            if (!checkAdminSilent(s)) { showHelp(s); return true; }
+            if (!(s instanceof Player)) { showHelp(s); return true; }
             startListening((Player) s);
             return true;
         }
+        if (!checkAdminSilent(s)) { showHelp(s); return true; }
         if (sub.equals("status")) {
-            // ===== 改动10: status直接用cfgVer字符串, 不需要String.valueOf =====
-            s.sendMessage("[SDF1] v" + cfgVer
-                    + " 计分板:" + cfgCdkObj
-                    + " 记名板:" + (cfgNameBoard.isEmpty() ? "(未设置)" : cfgNameBoard)
-                    + " 规则:" + scoreMap.size()
-                    + " 联控:" + cyPing()
-                    + " Vault:" + (economy != null ? economy.getName() : "无"));
-            return true;
-        }
-        if (!checkAdminSilent(s)) {
-            s.sendMessage(colorize("&c[SDF1] 权限不足"));
+            s.sendMessage("[SDF1] v" + cfgVer + " 计分板:" + cfgCdkObj + " 记名板:" + (cfgNameBoard.isEmpty() ? "(未设置)" : cfgNameBoard) + " 规则:" + scoreMap.size() + " 联控:" + cyPing() + " Vault:" + (economy != null ? economy.getName() : "无"));
             return true;
         }
         if (sub.equals("reload")) {
-            scoreMap.clear();
-            configLoaded = false;
-            cdksWarned = false;
-            listening.clear();
-            failCount = 0;
-            circuitBroken = false;
-            loadConfig(true);
-            discoverCyPlugin();
-            setupEconomy();
-            // ===== 改动11: reload输出也直接用cfgVer字符串 =====
+            scoreMap.clear(); configLoaded = false; cdksWarned = false; listening.clear(); failCount = 0; circuitBroken = false;
+            loadConfig(true); discoverCyPlugin(); setupEconomy();
             s.sendMessage("[SDF1] 重载 v" + cfgVer + " 规则:" + scoreMap.size());
             return true;
         }
         if (sub.equals("update")) { checkUpdate(s); return true; }
         if (sub.equals("get")) { execGet(s); return true; }
         if (sub.equals("import")) {
-            if (a.length < 2) {
-                s.sendMessage(colorize("&c用法: /sdf1 import <文件名.txt>"));
-                return true;
-            }
+            if (a.length < 2) { s.sendMessage(colorize("&c用法: /sdf1 import <文件名.txt>")); return true; }
             execImport(s, a[1]);
             return true;
         }
+        if (sub.equals("undo")) { doUndo(s); return true; }
         showHelp(s);
         return true;
     }
 
+    // ★ 修改：管理员显示完整帮助，非管理员只显示监听
     private void showHelp(CommandSender s) {
         if (checkAdminSilent(s)) {
             s.sendMessage(colorize("&e/sdf1 - 打开口令监听"));
@@ -1285,58 +1384,36 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             s.sendMessage(colorize("&e/sdf1 reload - 重载配置"));
             s.sendMessage(colorize("&e/sdf1 get - 查看口令库存"));
             s.sendMessage(colorize("&e/sdf1 import <文件> - 导入口令"));
+            s.sendMessage(colorize("&e/sdf1 undo - 撤销上次导入"));
             s.sendMessage(colorize("&e/import <文件> - 导入口令(独立命令)"));
             s.sendMessage(colorize("&e/sdf1 update - 检查更新"));
         } else {
             s.sendMessage(colorize("&e/sdf1 - 打开口令监听"));
-            s.sendMessage(colorize("&e/sdf1 status - 查看状态"));
-            s.sendMessage(colorize("&e/sdf1 listen - 开启监听"));
         }
     }
 
     private void execGet(CommandSender s) {
-        if (cfgCdkObj.isEmpty()) {
-            s.sendMessage(colorize("&c计分板未配置")); return;
-        }
+        if (cfgCdkObj.isEmpty()) { s.sendMessage(colorize("&c计分板未配置")); return; }
         try {
             Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
             Objective obj = board.getObjective(cfgCdkObj);
-            if (obj == null) {
-                s.sendMessage(colorize("&c计分板目标不存在: " + cfgCdkObj));
-                return;
-            }
+            if (obj == null) { s.sendMessage(colorize("&c计分板目标不存在: " + cfgCdkObj)); return; }
             Map<Integer, List<String>> grouped = new TreeMap<Integer, List<String>>();
             int total = 0;
             for (String entry : board.getEntries()) {
-                try {
-                    Score sc = obj.getScore(entry);
-                    if (sc.isScoreSet()) {
-                        int val = sc.getScore();
-                        if (!grouped.containsKey(val))
-                            grouped.put(val, new ArrayList<String>());
-                        grouped.get(val).add(entry);
-                        total++;
-                    }
-                } catch (Exception ignored) {}
+                try { Score sc = obj.getScore(entry); if (sc.isScoreSet()) { int val = sc.getScore(); if (!grouped.containsKey(val)) grouped.put(val, new ArrayList<String>()); grouped.get(val).add(entry); total++; } } catch (Exception ignored) {}
             }
             s.sendMessage(colorize("&a[SDF1] ===== 口令库存全量抄送 ====="));
             s.sendMessage(colorize("&a[SDF1] 口令库: " + cfgCdkObj));
             s.sendMessage(colorize("&a[SDF1] 总存货: " + total + " 条"));
             s.sendMessage(colorize("&a[SDF1] 规则数: " + scoreMap.size()));
-            if (!cfgNameBoard.isEmpty())
-                s.sendMessage(colorize("&a[SDF1] 记名板: " + cfgNameBoard));
+            if (!cfgNameBoard.isEmpty()) s.sendMessage(colorize("&a[SDF1] 记名板: " + cfgNameBoard));
             s.sendMessage(colorize("&7----------------"));
             for (Map.Entry<Integer, List<String>> entry : grouped.entrySet()) {
-                int scoreVal = entry.getKey();
-                List<String> codes = entry.getValue();
+                int scoreVal = entry.getKey(); List<String> codes = entry.getValue();
                 ScoreAction sa = scoreMap.get(scoreVal);
-                String ruleDesc = sa != null
-                        ? (sa.actions.size() + "个动作"
-                           + (sa.recordName ? " (记名)" : "")
-                           + (sa.deleteCode ? " (删口令)" : ""))
-                        : "未配置规则";
-                s.sendMessage(colorize("&e" + scoreVal + "分 &7[" + ruleDesc
-                        + "] &f共" + codes.size() + "条，口令为："));
+                String ruleDesc = sa != null ? (sa.actions.size() + "个动作" + (sa.recordName ? " (记名)" : "") + (sa.deleteCode ? " (删口令)" : "")) : "未配置规则";
+                s.sendMessage(colorize("&e" + scoreVal + "分 &7[" + ruleDesc + "] &f共" + codes.size() + "条，口令为："));
                 int claimedCount = 0;
                 if (sa != null && sa.recordName && !cfgNameBoard.isEmpty()) {
                     try {
@@ -1344,34 +1421,19 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                         if (nameObj != null) {
                             Set<String> codeSet = new HashSet<String>(codes);
                             for (String ne : board.getEntries()) {
-                                try {
-                                    Score ns = nameObj.getScore(ne);
-                                    if (ns.isScoreSet() && ns.getScore() > 0) {
-                                        for (String code : codeSet) {
-                                            if (ne.startsWith(code + "_")) {
-                                                claimedCount++; break;
-                                            }
-                                        }
-                                    }
-                                } catch (Exception ignored) {}
+                                try { Score ns = nameObj.getScore(ne); if (ns.isScoreSet() && ns.getScore() > 0) { for (String code : codeSet) { if (ne.startsWith(code + "_")) { claimedCount++; break; } } } } catch (Exception ignored) {}
                             }
                         }
                     } catch (Exception ignored) {}
                 }
-                for (String code : codes) {
-                    s.sendMessage(colorize("  &f" + code));
-                }
+                for (String code : codes) { s.sendMessage(colorize("  &f" + code)); }
                 if (sa != null && sa.recordName && !cfgNameBoard.isEmpty()) {
-                    s.sendMessage(colorize("  &7已领取: &c" + claimedCount
-                            + "&7/" + codes.size() + " (剩余&a"
-                            + (codes.size() - claimedCount) + "&7)"));
+                    s.sendMessage(colorize("  &7已领取: &c" + claimedCount + "&7/" + codes.size() + " (剩余&a" + (codes.size() - claimedCount) + "&7)"));
                 }
                 s.sendMessage(colorize("&7----------------"));
             }
             s.sendMessage(colorize("&a[SDF1] 抄送完毕"));
-        } catch (Exception e) {
-            s.sendMessage(colorize("&c查询失败: " + e.getMessage()));
-        }
+        } catch (Exception e) { s.sendMessage(colorize("&c查询失败: " + e.getMessage())); }
     }
 
     private String cleanImportCode(String s) {
@@ -1382,239 +1444,180 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private int tryImportCode(Objective obj, Scoreboard board, String code, int scoreVal) {
-        try {
-            if (obj.getScore(code).isScoreSet()
-                    && obj.getScore(code).getScore() > 0) return 2;
-        } catch (Exception e) { return 2; }
+        try { if (obj.getScore(code).isScoreSet() && obj.getScore(code).getScore() > 0) return 2; } catch (Exception e) { return 2; }
         ScoreAction targetSA = scoreMap.get(scoreVal);
-        if (targetSA != null && targetSA.recordName
-                && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
+        if (targetSA != null && targetSA.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
             try {
                 Objective nameObj = board.getObjective(cfgNameBoard);
                 if (nameObj != null) {
                     for (String ne : board.getEntries()) {
-                        if (ne.startsWith(code + "_")) {
-                            Score ns = nameObj.getScore(ne);
-                            if (ns.isScoreSet() && ns.getScore() > 0) {
-                                log("[导入-查重] \"" + code + "\" 已被领取，跳过");
-                                return 3;
-                            }
-                        }
+                        if (ne.startsWith(code + "_")) { Score ns = nameObj.getScore(ne); if (ns.isScoreSet() && ns.getScore() > 0) { log("[导入-查重] \"" + code + "\" 已被领取，跳过"); return 3; } }
                     }
                 }
             } catch (Exception ignored) {}
         }
-        try {
-            obj.getScore(code).setScore(scoreVal);
-            return 1;
-        } catch (Exception e) { return 2; }
+        try { obj.getScore(code).setScore(scoreVal); return 1; } catch (Exception e) { return 2; }
     }
 
+    // ★ 修改：导入时追踪口令用于撤销
     private void execImport(CommandSender s, String fileName) {
-        if (cfgCdkObj.isEmpty()) {
-            s.sendMessage(colorize("&c计分板未配置")); return;
-        }
+        if (cfgCdkObj.isEmpty()) { s.sendMessage(colorize("&c计分板未配置")); return; }
         File f = new File(getDataFolder(), fileName);
-        if (!f.exists()) {
-            s.sendMessage(colorize("&c文件不存在: " + fileName)); return;
-        }
+        if (!f.exists()) { s.sendMessage(colorize("&c文件不存在: " + fileName)); return; }
         try {
-            BufferedReader r = new BufferedReader(new InputStreamReader(
-                    new FileInputStream(f), StandardCharsets.UTF_8));
-            String line;
-            int count = 0, skip = 0, dedup = 0;
-            int currentScore = 1;
+            BufferedReader r = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8));
+            List<String> rawLines = new ArrayList<String>(); String line;
+            while ((line = r.readLine()) != null) rawLines.add(line); r.close();
+            List<String> diag = new ArrayList<String>();
+            List<String> cleanLines = stripAllComments(rawLines, diag);
+
+            undoBuf.clear(); canUndo = false;
+
+            int count = 0, skip = 0, dedup = 0; int currentScore = 1;
             Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
             Objective obj = board.getObjective(cfgCdkObj);
-            if (obj == null) {
-                s.sendMessage(colorize("&c计分板目标不存在: " + cfgCdkObj));
-                r.close(); return;
-            }
-            while ((line = r.readLine()) != null) {
-                line = line.trim();
-                if (line.isEmpty() || line.startsWith("#") || line.startsWith("//"))
-                    continue;
-                if (line.equals("--") || line.equals("---")) {
-                    currentScore = 1; continue;
-                }
-                Matcher blockHead = Pattern.compile(
-                        "^(\\d+)\\s*分\\s*[：:]?\\s*$").matcher(line);
-                if (blockHead.matches()) {
-                    currentScore = Math.max(1,
-                            Integer.parseInt(blockHead.group(1)));
-                    continue;
-                }
+            if (obj == null) { s.sendMessage(colorize("&c计分板目标不存在: " + cfgCdkObj)); return; }
+
+            for (String cleanLine : cleanLines) {
+                String trimmed = cleanLine.trim();
+                if (trimmed.isEmpty()) continue;
+                if (trimmed.equals("--") || trimmed.equals("---")) { currentScore = 1; continue; }
+                Matcher blockHead = Pattern.compile("^(\\d+)\\s*分\\s*[：:]?\\s*$").matcher(trimmed);
+                if (blockHead.matches()) { currentScore = Math.max(1, Integer.parseInt(blockHead.group(1))); continue; }
+
                 List<String[]> inlinePairs = new ArrayList<String[]>();
-                Matcher pairMatcher = Pattern.compile(
-                        "(\\S+?)\\s+(\\d+)\\s*分").matcher(line);
+                Matcher pairMatcher = Pattern.compile("(\\S+?)\\s+(\\d+)\\s*分").matcher(trimmed);
                 StringBuffer matchedSb = new StringBuffer();
-                while (pairMatcher.find()) {
-                    inlinePairs.add(new String[]{
-                            pairMatcher.group(1), pairMatcher.group(2)});
-                    pairMatcher.appendReplacement(matchedSb, "");
-                }
+                while (pairMatcher.find()) { inlinePairs.add(new String[]{pairMatcher.group(1), pairMatcher.group(2)}); pairMatcher.appendReplacement(matchedSb, ""); }
                 pairMatcher.appendTail(matchedSb);
                 String remainingLine = matchedSb.toString().trim();
+
                 if (!inlinePairs.isEmpty()) {
                     for (String[] pair : inlinePairs) {
-                        String codeBlock = pair[0].trim();
-                        int pairScore = Math.max(1, Integer.parseInt(pair[1]));
+                        String codeBlock = pair[0].trim(); int pairScore = Math.max(1, Integer.parseInt(pair[1]));
                         String[] subCodes = codeBlock.split("[|,，、;；]+");
                         for (String sub : subCodes) {
-                            sub = cleanImportCode(sub);
-                            if (sub.isEmpty()) continue;
+                            sub = cleanImportCode(sub); if (sub.isEmpty()) continue;
                             int result = tryImportCode(obj, board, sub, pairScore);
-                            if (result == 1) count++;
-                            else if (result == 2) skip++;
-                            else if (result == 3) dedup++;
+                            if (result == 1) { count++; undoBuf.add(new UndoRecord(sub, pairScore)); }
+                            else if (result == 2) skip++; else if (result == 3) dedup++;
                         }
                     }
                     if (!remainingLine.isEmpty()) {
-                        String[] remainParts =
-                                remainingLine.split("[|,，、;；]+");
+                        String[] remainParts = remainingLine.split("[|,，、;；]+");
                         for (String part : remainParts) {
-                            part = cleanImportCode(part);
-                            if (part.isEmpty()) continue;
+                            part = cleanImportCode(part); if (part.isEmpty()) continue;
                             int result = tryImportCode(obj, board, part, currentScore);
-                            if (result == 1) count++;
-                            else if (result == 2) skip++;
-                            else if (result == 3) dedup++;
+                            if (result == 1) { count++; undoBuf.add(new UndoRecord(part, currentScore)); }
+                            else if (result == 2) skip++; else if (result == 3) dedup++;
                         }
                     }
                 } else {
-                    String[] parts = line.split("[|,，、;；]+");
+                    String[] parts = trimmed.split("[|,，、;；]+");
                     for (String part : parts) {
-                        part = cleanImportCode(part);
-                        if (part.isEmpty()) continue;
+                        part = cleanImportCode(part); if (part.isEmpty()) continue;
                         int result = tryImportCode(obj, board, part, currentScore);
-                        if (result == 1) count++;
-                        else if (result == 2) skip++;
-                        else if (result == 3) dedup++;
+                        if (result == 1) { count++; undoBuf.add(new UndoRecord(part, currentScore)); }
+                        else if (result == 2) skip++; else if (result == 3) dedup++;
                     }
                 }
             }
-            r.close();
             String resultMsg = "&a[SDF1] 导入完成: 新增 " + count + " 条，跳过 " + skip + " 条";
-            if (dedup > 0)
-                resultMsg += "，记名查重拦截 " + dedup + " 条";
+            if (dedup > 0) resultMsg += "，记名查重拦截 " + dedup + " 条";
             s.sendMessage(colorize(resultMsg));
-            log("[导入] " + s.getName() + " " + fileName
-                    + " 新增=" + count + " 跳过=" + skip + " 查重=" + dedup);
-        } catch (Exception e) {
-            s.sendMessage(colorize("&c读取失败: " + e.getMessage()));
+            log("[导入] " + s.getName() + " " + fileName + " 新增=" + count + " 跳过=" + skip + " 查重=" + dedup);
+            if (!undoBuf.isEmpty()) { canUndo = true; s.sendMessage(colorize("&e/sdf1 undo &7可撤销本次导入")); }
+        } catch (Exception e) { s.sendMessage(colorize("&c读取失败: " + e.getMessage())); }
+    }
+
+    // ★ 新增：撤销上次导入
+    private void doUndo(CommandSender s) {
+        if (!canUndo || undoBuf.isEmpty()) { s.sendMessage(colorize("&c无可撤销的导入操作")); return; }
+        Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+        Objective obj = board.getObjective(cfgCdkObj);
+        if (obj == null) { s.sendMessage(colorize("&c计分板目标不存在")); undoBuf.clear(); canUndo = false; return; }
+        int removed = 0;
+        for (UndoRecord rec : undoBuf) {
+            try {
+                Score sc = obj.getScore(rec.code);
+                if (sc.isScoreSet()) {
+                    boolean ok = false;
+                    try { obj.getClass().getMethod("resetScore", String.class).invoke(obj, rec.code); ok = true; } catch (Throwable ignored) {}
+                    if (!ok) try { board.getClass().getMethod("resetScore", String.class).invoke(board, rec.code); ok = true; } catch (Throwable ignored) {}
+                    if (!ok) sc.setScore(Integer.MIN_VALUE);
+                    removed++;
+                }
+            } catch (Exception ignored) {}
         }
+        final List<String> codes = new ArrayList<String>();
+        for (UndoRecord rec : undoBuf) codes.add(rec.code);
+        Bukkit.getScheduler().runTask(this, new Runnable() {
+            public void run() {
+                for (String code : codes) {
+                    try { String safeCode = code.replace("\"", "\\\""); Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "scoreboard players reset " + safeCode + " " + cfgCdkObj); } catch (Exception ignored) {}
+                }
+            }
+        });
+        s.sendMessage(colorize("&a[SDF1] 撤销完成: 移除 " + removed + "/" + undoBuf.size() + " 条口令"));
+        log("[撤销] " + s.getName() + " 移除=" + removed + "/" + undoBuf.size());
+        undoBuf.clear(); canUndo = false;
     }
 
     private void checkUpdate(final CommandSender manual) {
-        new Thread(new Runnable() {
-            public void run() {
-                try {
-                    boolean preferGH = "GH".equalsIgnoreCase(cfgUpdateChannel)
-                            || cfgUpdateChannel.isEmpty();
-                    String pApi = preferGH ? API_GH : API_GE;
-                    String pDl = preferGH ? DL_GH : DL_GE;
-                    String pName = preferGH ? "GitHub" : "Gitee";
-                    String bApi = preferGH ? API_GE : API_GH;
-                    String bDl = preferGH ? DL_GE : DL_GH;
-                    String bName = preferGH ? "Gitee" : "GitHub";
-                    String[] result = fetchRelease(pApi, pName);
-                    if (result != null) {
-                        applyUpdate(result[0], result[1], pDl, manual, pName);
-                        return;
-                    }
-                    log("[更新] " + pName + " 失败，切换 " + bName);
-                    result = fetchRelease(bApi, bName);
-                    if (result != null) {
-                        applyUpdate(result[0], result[1], bDl, manual, bName);
-                        return;
-                    }
-                    log("[更新] 双路均失败");
-                    if (manual != null) manual.sendMessage("[更新] 检查失败");
-                } catch (Exception e) {
-                    log("[更新] 异常: " + e.getMessage());
-                }
-            }
-        }).start();
+        String checkingMsg = "[SDF1] 正在检查更新..."; log(checkingMsg);
+        if (manual != null) manual.sendMessage(checkingMsg);
+        new Thread(new Runnable() { public void run() {
+            try {
+                boolean preferGH = "GH".equalsIgnoreCase(cfgUpdateChannel) || cfgUpdateChannel.isEmpty();
+                String pApi = preferGH ? API_GH : API_GE; String pDl = preferGH ? DL_GH : DL_GE; String pName = preferGH ? "GitHub" : "Gitee";
+                String bApi = preferGH ? API_GE : API_GH; String bDl = preferGH ? DL_GE : DL_GH; String bName = preferGH ? "Gitee" : "GitHub";
+                String[] result = fetchRelease(pApi, pName);
+                if (result != null) { applyUpdate(result[0], result[1], pDl, manual, pName); return; }
+                log("[更新] " + pName + " 失败，切换 " + bName);
+                result = fetchRelease(bApi, bName);
+                if (result != null) { applyUpdate(result[0], result[1], bDl, manual, bName); return; }
+                log("[更新] 双路均失败");
+                if (manual != null) manual.sendMessage("[更新] 检查失败");
+            } catch (Exception e) { log("[更新] 异常: " + e.getMessage()); }
+        }}).start();
     }
 
     private String[] fetchRelease(String apiUrl, String ch) {
         try {
-            TrustManager[] trustAll = new TrustManager[]{
-                    new X509TrustManager() {
-                        public X509Certificate[] getAcceptedIssuers() { return null; }
-                        public void checkClientTrusted(
-                                X509Certificate[] c, String a) {}
-                        public void checkServerTrusted(
-                                X509Certificate[] c, String a) {}
-                    }
-            };
-            SSLContext sc = SSLContext.getInstance("TLS");
-            sc.init(null, trustAll, new java.security.SecureRandom());
-            HttpsURLConnection.setDefaultSSLSocketFactory(
-                    sc.getSocketFactory());
-            HttpsURLConnection.setDefaultHostnameVerifier(
-                    new javax.net.ssl.HostnameVerifier() {
-                        public boolean verify(String h, javax.net.ssl.SSLSession sess) {
-                            return true;
-                        }
-                    });
-            HttpURLConnection c = (HttpURLConnection)
-                    new URL(apiUrl).openConnection();
-            c.setRequestMethod("GET");
-            c.setRequestProperty("User-Agent", "SDF1-Plugin/1.0");
-            c.setRequestProperty("Accept", "application/json");
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(15000);
-            c.setInstanceFollowRedirects(true);
-            if (c.getResponseCode() != 200) {
-                log("[更新] " + ch + " HTTP " + c.getResponseCode());
-                return null;
-            }
-            String json = new String(
-                    c.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-            String rv = jParse(json, "tag_name");
-            String rn = jParse(json, "body");
+            TrustManager[] trustAll = new TrustManager[]{new X509TrustManager(){public X509Certificate[] getAcceptedIssuers(){return null;}public void checkClientTrusted(X509Certificate[] c,String a){}public void checkServerTrusted(X509Certificate[] c,String a){}}};
+            SSLContext sc = SSLContext.getInstance("TLS"); sc.init(null, trustAll, new java.security.SecureRandom());
+            URL url = new URL(apiUrl); HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            if (c instanceof HttpsURLConnection) { HttpsURLConnection hc = (HttpsURLConnection) c; hc.setSSLSocketFactory(sc.getSocketFactory()); hc.setHostnameVerifier(new javax.net.ssl.HostnameVerifier(){public boolean verify(String h,javax.net.ssl.SSLSession sess){return true;}}); }
+            c.setRequestMethod("GET"); c.setRequestProperty("User-Agent", "Mozilla/5.0 SDF1-Plugin/1.0"); c.setRequestProperty("Accept", "application/vnd.github.v3+json");
+            c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setInstanceFollowRedirects(true);
+            int code = c.getResponseCode();
+            if (code != 200) { log("[更新] " + ch + " HTTP " + code); try{c.getErrorStream().close();}catch(Exception ignored){} return null; }
+            String json = readStream(c.getInputStream()); c.disconnect();
+            if (json == null || json.isEmpty()) { log("[更新] " + ch + " 响应为空"); return null; }
+            String rv = jParse(json, "tag_name"); String rn = jParse(json, "body");
             if (rv == null || rv.isEmpty()) return null;
             return new String[]{rv, rn != null ? rn : ""};
-        } catch (Exception e) {
-            log("[更新] " + ch + " " + e.getMessage());
-            return null;
-        }
+        } catch (Exception e) { log("[更新] " + ch + " " + e.getMessage()); return null; }
     }
 
-    // ===== 改动12: applyUpdate - 版本比较直接用字符串 =====
-    private void applyUpdate(String rv, String notes, String dlLink,
-                             CommandSender manual, String ch) {
+    private String readStream(InputStream is) {
+        try { BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8)); StringBuilder sb = new StringBuilder(); String line; while ((line = reader.readLine()) != null) sb.append(line); reader.close(); return sb.toString(); }
+        catch (Exception e) { log("[更新] 读取流失败: " + e.getMessage()); return null; }
+    }
+
+    private void applyUpdate(String rv, String notes, String dlLink, CommandSender manual, String ch) {
         remoteVer = rv;
         if (!rv.equals(cfgVer)) {
-            String msg = "[SDF1] 新版本! v" + cfgVer + " -> v" + rv;
-            log(msg);
-            log("下载: " + dlLink);
-            if (manual != null) {
-                manual.sendMessage(msg);
-                manual.sendMessage("下载: " + dlLink);
-            }
-            for (Player op : Bukkit.getOnlinePlayers()) {
-                if (op.isOp()) {
-                    op.sendMessage(msg);
-                    op.sendMessage("下载: " + dlLink);
-                }
-            }
-        } else {
-            log("[更新] 已是最新 v" + cfgVer);
-            if (manual != null)
-                manual.sendMessage("[SDF1] 已是最新 v" + cfgVer);
-        }
+            String msg = "[SDF1] 新版本! v" + cfgVer + " -> v" + rv; log(msg); log("下载: " + dlLink);
+            if (manual != null) { manual.sendMessage(msg); manual.sendMessage("下载: " + dlLink); }
+            for (Player op : Bukkit.getOnlinePlayers()) { if (op.isOp()) { op.sendMessage(msg); op.sendMessage("下载: " + dlLink); } }
+        } else { log("[更新] 已是最新 v" + cfgVer); if (manual != null) manual.sendMessage("[SDF1] 已是最新 v" + cfgVer); }
     }
 
     private static String jParse(String j, String k) {
-        int i = j.indexOf("\"" + k + "\"");
-        if (i < 0) return "";
-        int colon = j.indexOf(":", i);
-        int start = j.indexOf("\"", colon + 1);
-        if (start < 0) return "";
-        int end = j.indexOf("\"", start + 1);
-        if (end < 0) return "";
+        int i = j.indexOf("\"" + k + "\""); if (i < 0) return "";
+        int colon = j.indexOf(":", i); int start = j.indexOf("\"", colon + 1);
+        if (start < 0) return ""; int end = j.indexOf("\"", start + 1); if (end < 0) return "";
         return j.substring(start + 1, end);
     }
 }
