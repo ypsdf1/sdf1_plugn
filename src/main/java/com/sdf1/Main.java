@@ -42,7 +42,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private String cfgCdkObj = "";
     private String cfgCyName = "";
-    private int cfgVer = 0;
+    // ===== 改动1: cfgVer 从 int 改为 String, 保留完整版本号 =====
+    private String cfgVer = "";
     private boolean configLoaded = false;
     private boolean cdksWarned = false;
     private String cfgLinkMode = "";
@@ -243,6 +244,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         writeFallbackConfig(f);
     }
 
+    // ===== 改动2: 默认配置版本号写为 "1.0" 而非 "1" =====
     private void writeFallbackConfig(File f) {
         try {
             File parent = f.getParentFile();
@@ -250,7 +252,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             PrintWriter pw = new PrintWriter(new OutputStreamWriter(
                     new FileOutputStream(f), StandardCharsets.UTF_8));
             pw.println("# SDF1 主控配置");
-            pw.println("版本号: 1");
+            pw.println("版本号: 1.0");
             pw.println("更新通道: GH");
             pw.println("管理团队: admin");
             pw.println("管理标签: admin");
@@ -277,7 +279,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         cdksWarned = false;
         cfgCdkObj = "";
         cfgCyName = "";
-        cfgVer = 0;
+        // ===== 改动3: cfgVer 清空用空字符串 =====
+        cfgVer = "";
         cfgLinkMode = "";
         cfgUpdateChannel = "";
         cfgNameBoard = "";
@@ -375,11 +378,10 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 diag.add("  -> [跳过] 未知: \"" + key + "\"");
             }
         }
-        String verStr = safeStr(globals.get("版本号"));
-        if (!verStr.isEmpty()) {
-            try { cfgVer = (int) Double.parseDouble(verStr); }
-            catch (Exception e) { cfgVer = 0; }
-        }
+
+        // ===== 改动4: 版本号直接作为字符串保留, 不再转int =====
+        cfgVer = safeStr(globals.get("版本号"));
+
         cfgCdkObj = safeStr(globals.get("计分板"));
         cfgCyName = safeStr(globals.get("联控插件"));
         cfgLinkMode = safeStr(globals.get("联控模式"));
@@ -402,20 +404,27 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 e.decimalPlaces = safeInt(block.getOrDefault("_小数位", "-1"));
                 e.rawText = "经济盲盒 " + fmtMoney(e.moneyMin) + "~" + fmtMoney(e.moneyMax);
                 sa.actions.add(e);
-            } else if ("true".equals(block.get("_联控盲盒"))) {
+            }
+            // ===== 改动5: 联控盲盒 - 修正默认值逻辑, max默认等于min, 并加保护 =====
+            else if ("true".equals(block.get("_联控盲盒"))) {
                 ActionEntry e = new ActionEntry("联控盲盒");
                 e.daysMin = safeInt(block.getOrDefault("_天数min", "7"));
                 e.daysMax = safeInt(block.getOrDefault("_天数max", "90"));
                 e.slotsMin = safeInt(block.getOrDefault("_格子min", "27"));
                 e.slotsMax = safeInt(block.getOrDefault("_格子max", "136"));
                 if (e.daysMin <= 0) e.daysMin = 7;
-                if (e.daysMax <= 0) e.daysMax = 90;
                 if (e.slotsMin <= 0) e.slotsMin = 27;
-                if (e.slotsMax <= 0) e.slotsMax = 136;
+                if (e.daysMax <= 0) e.daysMax = e.daysMin;
+                if (e.slotsMax <= 0) e.slotsMax = e.slotsMin;
+                if (e.daysMax < e.daysMin) e.daysMax = e.daysMin;
+                if (e.slotsMax < e.slotsMin) e.slotsMax = e.slotsMin;
                 e.rawText = "联控盲盒 " + e.daysMin + "~" + e.daysMax + "天 "
                         + e.slotsMin + "~" + e.slotsMax + "格";
+                log("[配置] 联控盲盒范围: " + e.daysMin + "~" + e.daysMax + "天 "
+                        + e.slotsMin + "~" + e.slotsMax + "格");
                 sa.actions.add(e);
-            } else {
+            }
+            else {
                 if (block.containsKey("_发钱")) {
                     ActionEntry e = new ActionEntry("发钱");
                     e.money = safeDouble(block.get("_发钱"));
@@ -489,11 +498,29 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 block.put("_格子min", String.valueOf(sr[1]));
                 block.put("_天数max", String.valueOf(sr[2]));
                 block.put("_格子max", String.valueOf(sr[3]));
-                diag.add("    -> 识别: 联控盲盒");
+                diag.add("    -> 识别: 联控盲盒 天数=" + sr[0] + "~" + sr[2]
+                        + " 格子=" + sr[1] + "~" + sr[3]);
+                return;
+            }
+            // ===== 改动6: 无明确范围时, 尝试分别提取天数和格子的独立范围 =====
+            int[] dayRange = extractDayRange(text);
+            int[] slotRange = extractSlotRange(text);
+            if (dayRange != null || slotRange != null) {
+                block.put("_联控盲盒", "true");
+                if (dayRange != null) {
+                    block.put("_天数min", String.valueOf(dayRange[0]));
+                    block.put("_天数max", String.valueOf(dayRange[1]));
+                    diag.add("    -> 识别: 天数范围 " + dayRange[0] + "~" + dayRange[1]);
+                }
+                if (slotRange != null) {
+                    block.put("_格子min", String.valueOf(slotRange[0]));
+                    block.put("_格子max", String.valueOf(slotRange[1]));
+                    diag.add("    -> 识别: 格子范围 " + slotRange[0] + "~" + slotRange[1]);
+                }
                 return;
             }
             block.put("_联控盲盒", "true");
-            diag.add("    -> 识别: 联控盲盒(默认)");
+            diag.add("    -> 识别: 联控盲盒(默认范围)");
             return;
         }
         boolean hasSlotKw = text.contains("背包") || text.contains("空间")
@@ -527,6 +554,52 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 diag.add("    -> 识别: 发钱 " + amt);
             }
         }
+    }
+
+    // ===== 改动7: 新增独立天数范围提取 =====
+    private int[] extractDayRange(String text) {
+        // 格式: "X天~A天" 或 "X到A天"
+        Matcher m = Pattern.compile(
+                "(\\d+)\\s*天\\s*[~\\-到至]+\\s*(\\d+)\\s*天"
+        ).matcher(text);
+        if (m.find()) {
+            int a = Integer.parseInt(m.group(1));
+            int b = Integer.parseInt(m.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        // 格式: "X~A天"
+        Matcher m2 = Pattern.compile(
+                "(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*天"
+        ).matcher(text);
+        if (m2.find()) {
+            int a = Integer.parseInt(m2.group(1));
+            int b = Integer.parseInt(m2.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        return null;
+    }
+
+    // ===== 改动8: 新增独立格子范围提取 =====
+    private int[] extractSlotRange(String text) {
+        // 格式: "X格~A格" 或 "X到A格"
+        Matcher m = Pattern.compile(
+                "(\\d+)\\s*格\\s*[~\\-到至]+\\s*(\\d+)\\s*格"
+        ).matcher(text);
+        if (m.find()) {
+            int a = Integer.parseInt(m.group(1));
+            int b = Integer.parseInt(m.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        // 格式: "X~A格"
+        Matcher m2 = Pattern.compile(
+                "(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*格"
+        ).matcher(text);
+        if (m2.find()) {
+            int a = Integer.parseInt(m2.group(1));
+            int b = Integer.parseInt(m2.group(2));
+            return new int[]{Math.min(a, b), Math.max(a, b)};
+        }
+        return null;
     }
 
     private String safeStr(String s) { return s == null ? "" : s.trim(); }
@@ -1055,8 +1128,12 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         }, 20L);
     }
 
+    // ===== 改动9: 联控盲盒执行 - 修正随机逻辑 + 增加日志 =====
     private void execSlotBox(final Player p, final ActionEntry a,
                              final boolean deleteCode, final String code) {
+        log("[联控盲盒] 玩家=" + p.getName()
+                + " 天数范围=" + a.daysMin + "~" + a.daysMax
+                + " 格子范围=" + a.slotsMin + "~" + a.slotsMax);
         p.sendMessage(colorize("&6&l[SDF1] &e&l盲盒开启中..."));
         Bukkit.getScheduler().runTaskLater(this, new Runnable() {
             public void run() {
@@ -1066,10 +1143,14 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                         p.sendMessage(colorize("&6&l[SDF1] &e&l即将揭晓..."));
                         Bukkit.getScheduler().runTaskLater(Main.this, new Runnable() {
                             public void run() {
-                                int rd = a.daysMin + rng.nextInt(
-                                        Math.max(1, a.daysMax - a.daysMin + 1));
-                                int rs = a.slotsMin + rng.nextInt(
-                                        Math.max(1, a.slotsMax - a.slotsMin + 1));
+                                int dayRange = Math.max(0, a.daysMax - a.daysMin);
+                                int slotRange = Math.max(0, a.slotsMax - a.slotsMin);
+                                int rd = a.daysMin + (dayRange > 0
+                                        ? rng.nextInt(dayRange + 1) : 0);
+                                int rs = a.slotsMin + (slotRange > 0
+                                        ? rng.nextInt(slotRange + 1) : 0);
+                                log("[联控盲盒] 随机结果: " + rd + "天 "
+                                        + rs + "格");
                                 if (tryCyActivate(p, rs, rd)) {
                                     consumeCode(code, deleteCode);
                                     p.sendMessage(colorize("&6&l[SDF1] &e&l恭喜！获得 &c&l"
@@ -1155,6 +1236,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             return true;
         }
         if (sub.equals("status")) {
+            // ===== 改动10: status直接用cfgVer字符串, 不需要String.valueOf =====
             s.sendMessage("[SDF1] v" + cfgVer
                     + " 计分板:" + cfgCdkObj
                     + " 记名板:" + (cfgNameBoard.isEmpty() ? "(未设置)" : cfgNameBoard)
@@ -1177,6 +1259,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             loadConfig(true);
             discoverCyPlugin();
             setupEconomy();
+            // ===== 改动11: reload输出也直接用cfgVer字符串 =====
             s.sendMessage("[SDF1] 重载 v" + cfgVer + " 规则:" + scoreMap.size());
             return true;
         }
@@ -1499,10 +1582,11 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         }
     }
 
+    // ===== 改动12: applyUpdate - 版本比较直接用字符串 =====
     private void applyUpdate(String rv, String notes, String dlLink,
                              CommandSender manual, String ch) {
         remoteVer = rv;
-        if (!rv.equals(String.valueOf(cfgVer))) {
+        if (!rv.equals(cfgVer)) {
             String msg = "[SDF1] 新版本! v" + cfgVer + " -> v" + rv;
             log(msg);
             log("下载: " + dlLink);
