@@ -190,7 +190,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private String colorize(String s) {
         if (s == null) return "";
-        return s.replaceAll("&([0-9a-fk-orA-FK-OR])", "\u00a7$1");
+        return s.replaceAll("&([0-9a-fk-orA-FK-OR])", "§$1");
     }
 
     @Override
@@ -560,7 +560,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         text = text.replaceAll("^['\"](.*)['\"]$", "$1").trim();
         text = normalizeText(text);
         log("[SDF1-诊断-动作] 输入: [" + text + "]");
-        text = text.replace('\uff0d', '-').replace('\u2013', '-').replace('\u2014', '-').replace('\uff5e', '~');
+        text = text.replace('－', '-').replace('–', '-').replace('—', '-').replace('～', '~');
 
         String norm = normalizeAllDigits(text);
         norm = normalizeEnglishNumbers(norm);
@@ -578,7 +578,11 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             if (bondBlindM.find()) {
                 int bmin = Integer.parseInt(bondBlindM.group(1));
                 int bmax = Integer.parseInt(bondBlindM.group(2));
-                if (bmin > bmax) { int t2 = bmin; bmin = bmax; bmax = t2; }
+                if (bmin > bmax) {
+                    int t2 = bmin;
+                    bmin = bmax;
+                    bmax = t2;
+                }
                 block.put("_债券盲盒", "true");
                 block.put("_债券盲盒_min", String.valueOf(bmin));
                 block.put("_债券盲盒_max", String.valueOf(bmax));
@@ -591,7 +595,11 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 if (bondR.find()) {
                     int bmin = Integer.parseInt(bondR.group(1));
                     int bmax = Integer.parseInt(bondR.group(2));
-                    if (bmin > bmax) { int t2 = bmin; bmin = bmax; bmax = t2; }
+                    if (bmin > bmax) {
+                        int t2 = bmin;
+                        bmin = bmax;
+                        bmax = t2;
+                    }
                     block.put("_债券盲盒", "true");
                     block.put("_债券盲盒_min", String.valueOf(bmin));
                     block.put("_债券盲盒_max", String.valueOf(bmax));
@@ -600,7 +608,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             }
             // 固定发债券（非盲盒）
             if (!"true".equals(block.get("_债券盲盒"))) {
-                Matcher bondM = Pattern.compile("(\\d+)\\s*个?\\s*债券").matcher(norm);
+                Matcher bondM = Pattern.compile("(\\d+)\\s*[个块枚元]?" + "\\s*债券").matcher(norm);
                 if (bondM.find()) {
                     int bondAmt = Integer.parseInt(bondM.group(1));
                     block.put("_发债券", String.valueOf(bondAmt));
@@ -761,10 +769,12 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             }
         }
 
-        // ★ 发钱检测（排除债券，债券已独立处理）
-        boolean isGive = !isTake && (norm.contains("给") || norm.contains("奖")
-                || norm.contains("发") || norm.contains("加") || norm.contains("赏")
-                || norm.contains("赠送") || norm.contains("返"));
+        // ★ 发钱检测（排除债券、排除扣钱）
+        boolean isGive = !isTake && !norm.contains("债券")
+                && (norm.contains("给") || norm.contains("奖")
+                || norm.contains("发") || norm.contains("加")
+                || norm.contains("赏") || norm.contains("赠送")
+                || norm.contains("返"));
         if (isGive) {
             double amt = extractMoneyExcludingSlots(norm);
             if (amt > 0) {
@@ -773,8 +783,6 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             }
         }
     }
-
-
     private String safeStr(String s) { return s == null ? "" : s.trim(); }
 
     private int safeInt(String s) {
@@ -803,7 +811,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         StringBuilder sb = new StringBuilder(s.length());
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
-            if (c >= '\uFF10' && c <= '\uFF19') {
+            if (c >= '０' && c <= '９') {
                 sb.append((char)(c - 0xFF10 + '0'));
             } else if (c == '\uFF0E') {
                 sb.append('.');
@@ -927,9 +935,9 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private String normalizeText(String s) {
         if (s == null) return "";
-        return s.replace('\uff0d', '-').replace('\u2013', '-').replace('\u2014', '-')
-                .replace('\u2212', '-').replace('\uff5e', '~')
-                .replace("\u200b", "").replace("\ufeff", "");
+        return s.replace('－', '-').replace('–', '-').replace('—', '-')
+                .replace('−', '-').replace('～', '~')
+                .replace("​", "").replace("﻿", "");
     }
 
     private int parseChineseNum(String s) {
@@ -1260,13 +1268,90 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         try {
             Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
             Objective obj = board.getObjective(cfgCdkObj);
-            if (obj == null) { if (!cdksWarned) { log("[计分板] 找不到: " + cfgCdkObj); cdksWarned = true; } return -1; }
+            if (obj == null) {
+                if (!cdksWarned) { log("[计分板] 找不到: " + cfgCdkObj); cdksWarned = true; }
+                return -1;
+            }
             cdksWarned = false;
+
+            // 第一轮：精确匹配
             Score s = obj.getScore(code);
-            if (!s.isScoreSet()) return -1;
-            return s.getScore();
+            if (s.isScoreSet()) return s.getScore();
+
+            // 第二轮：模糊匹配 —— 去分隔符 + 统一大小写
+            String normInput = normalizeForCompare(code);
+            for (String entry : board.getEntries()) {
+                Score sc = obj.getScore(entry);
+                if (sc.isScoreSet()) {
+                    if (normalizeForCompare(entry).equals(normInput)) {
+                        log("[模糊匹配] \"" + code + "\" -> 标准码 \""
+                                + entry + "\" 分值=" + sc.getScore());
+                        return sc.getScore();
+                    }
+                }
+            }
+            return -1;
         } catch (Exception e) { return -1; }
     }
+
+    /**
+     * 查找口令，返回 [分值, 标准码]
+     * 玩家输入 aaabbbbcccc → 标准码 AAAA-BBBB-CCCC
+     * 如果精确匹配就用原码，模糊匹配就返回计分板上的原始条目
+     */
+    private Object[] lookupScoreAndCanonical(String code) {
+        if (!configLoaded || cfgCdkObj.isEmpty())
+            return new Object[]{ -1, code };
+        try {
+            Scoreboard board =
+                    Bukkit.getScoreboardManager().getMainScoreboard();
+            Objective obj = board.getObjective(cfgCdkObj);
+            if (obj == null) {
+                if (!cdksWarned) {
+                    log("[计分板] 找不到: " + cfgCdkObj);
+                    cdksWarned = true;
+                }
+                return new Object[]{ -1, code };
+            }
+            cdksWarned = false;
+
+            // 第一轮：精确匹配
+            Score s = obj.getScore(code);
+            if (s.isScoreSet()) {
+                return new Object[]{ s.getScore(), code };
+            }
+
+            // 第二轮：模糊匹配
+            String normInput = normalizeForCompare(code);
+            for (String entry : board.getEntries()) {
+                Score sc = obj.getScore(entry);
+                if (sc.isScoreSet()) {
+                    if (normalizeForCompare(entry).equals(normInput)) {
+                        log("[模糊匹配] \"" + code
+                                + "\" -> 标准码 \"" + entry
+                                + "\" 分值=" + sc.getScore());
+                        return new Object[]{ sc.getScore(), entry };
+                    }
+                }
+            }
+
+            return new Object[]{ -1, code };
+        } catch (Exception e) {
+            return new Object[]{ -1, code };
+        }
+    }
+    /**
+     * 去除所有分隔符，统一转小写
+     * "AAAA-BBBB-CCCC" → "aaaabbbbcccc"
+     * "aaabbbbcccc"    → "aaaabbbbcccc"
+     * "aAa-BbBb-CcCc"  → "aaaabbbbcccc"
+     * "AAAA BB BB CC CC" → "aaaabbbbcccc"
+     */
+    private String normalizeForCompare(String s) {
+        if (s == null) return "";
+        return s.replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
+    }
+
 
     private void consumeCode(String code, boolean deleteCode) {
         if (!deleteCode) return;
@@ -1664,73 +1749,61 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         consumeCode(code, true);
     }
 
-    private boolean tryBondRedeem(Player p, String code) {
-        Connection bdb = getBondDb();
-        if (bdb == null) return false;
+    private boolean tryBondRedeem(Player p,
+                                  String code) {
         try {
-            PreparedStatement ps = bdb.prepareStatement(
-                    "SELECT amount, used FROM cdk WHERE code=?");
-            ps.setString(1, code);
-            ResultSet rs = ps.executeQuery();
-            if (!rs.next()) {
-                rs.close();
-                ps.close();
+            Plugin sdf1 = Bukkit.getPluginManager()
+                    .getPlugin("Sdf1_login");
+            if (sdf1 == null || !sdf1.isEnabled())
                 return false;
-            }
-            int amount = rs.getInt("amount");
-            int used = rs.getInt("used");
-            rs.close();
-            ps.close();
 
-            if (used == 1) {
-                p.sendMessage(colorize("&c此兑换码已被使用"));
+            java.lang.reflect.Method m =
+                    sdf1.getClass().getMethod(
+                            "redeemBondForExternal",
+                            String.class,
+                            String.class);
+            Object result = m.invoke(sdf1,
+                    p.getName(), code);
+            String res = result != null
+                    ? result.toString()
+                    : "fail:null";
+
+            if (res.startsWith("success:")) {
+                String[] parts = res.split(":");
+                int amount =
+                        Integer.parseInt(parts[1]);
+                int bef =
+                        Integer.parseInt(parts[2]);
+                int aft =
+                        Integer.parseInt(parts[3]);
+
+                p.sendMessage(colorize(
+                        "&6&l[债券] &e&l恭喜！获得 &c&l"
+                                + amount + " &e&l债券！"));
+                p.sendMessage(colorize(
+                        "&7余额: &e" + bef
+                                + " &7-> &a" + aft));
+                log("[债券] " + p.getName()
+                        + " 兑换 " + amount + " 债券");
                 return true;
             }
 
-            PreparedStatement up = bdb.prepareStatement(
-                    "UPDATE cdk SET used=1, used_by=?, used_time=? WHERE code=?");
-            up.setString(1, p.getName());
-            up.setLong(2, System.currentTimeMillis());
-            up.setString(3, code);
-            up.executeUpdate();
-            up.close();
-
-            int beforeBal = 0;
-            PreparedStatement q0 = bdb.prepareStatement(
-                    "SELECT amount FROM bonds WHERE player_name=?");
-            q0.setString(1, p.getName());
-            ResultSet rs0 = q0.executeQuery();
-            if (rs0.next()) beforeBal = rs0.getInt("amount");
-            rs0.close(); q0.close();
-
-            int befBal = 0;
-            PreparedStatement q1 = bdb.prepareStatement(
-                    "SELECT amount FROM bonds WHERE player_name=?");
-            q0.setString(1, p.getName());
-            ResultSet rs1 = q0.executeQuery();
-            if (rs0.next()) befBal = rs0.getInt("amount");
-            rs0.close(); q0.close();
-
-            PreparedStatement add = bdb.prepareStatement(
-                    "INSERT INTO bonds(player_name, amount) VALUES(?,?) "
-                            + "ON CONFLICT(player_name) "
-                            + "DO UPDATE SET amount=amount+?");
-            add.setString(1, p.getName());
-            add.setInt(2, amount);
-            add.setInt(3, amount);
-            add.executeUpdate();
-            add.close();
-
-            logBondTx(p.getName(), "redeem", amount,
-                    "", "CDK系统", "兑换码兑换",
-                    befBal, befBal + amount);
-
-
-            p.sendMessage(colorize("&6&l[债券] &e&l恭喜！获得 &c&l" + amount + " &e&l债券！"));
-            log("[债券] " + p.getName() + " 兑换 " + amount + " 债券");
-            return true;
+            if ("fail:not_found".equals(res))
+                return false;
+            if ("fail:already_used".equals(res)) {
+                p.sendMessage(colorize(
+                        "&c此兑换码已被使用"));
+                return true;
+            }
+            if ("fail:frozen".equals(res)) {
+                p.sendMessage(colorize(
+                        "&c账户已被冻结"));
+                return true;
+            }
+            return false;
         } catch (Exception e) {
-            log("[债券] 兑换异常: " + e.getMessage());
+            log("[债券] 反射调用失败: "
+                    + e.getMessage());
             return false;
         }
     }
