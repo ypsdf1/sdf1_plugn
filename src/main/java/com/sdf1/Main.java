@@ -70,6 +70,9 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     private java.lang.reflect.Method discoveredCyPing = null;
     private long lastCyDiscover = 0;
     private static final long DISCOVER_INTERVAL = 30000L;
+    private String cfgCouponBoard = "";
+    private final Map<Integer, Integer> couponRules
+            = new HashMap<>();
 
 
     private static final Map<String, String> ALIASES = new HashMap<String, String>();
@@ -204,11 +207,14 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         getCommand("import").setExecutor(this);
         getServer().getPluginManager().registerEvents(this, this);
         checkUpdate(null);
-        log("[SDF1] ===== 启动完成 =====");
+        cfgCouponBoard = "";
+        couponRules.clear();
+
+        log("===== 启动完成 =====");
     }
 
     @Override
-    public void onDisable() { log("[SDF1] 卸载"); listening.clear(); }
+    public void onDisable() { log("卸载"); listening.clear(); }
 
     private void log(String msg) { getLogger().info(msg); }
 
@@ -342,41 +348,42 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             String line;
             while ((line = r.readLine()) != null) rawLines.add(line);
             r.close();
-            log("[SDF1-诊断] 文件编码检测: " + encoding.name());
-            log("[SDF1-诊断] 文件大小: " + f.length() + " 字节");
-            log("[SDF1-诊断] ===== 原始行内容(前20行) =====");
-            for (int i = 0; i < Math.min(20, rawLines.size()); i++) {
-                String raw = rawLines.get(i);
-                log("[SDF1-诊断] L" + (i + 1) + ": [" + raw + "]");
-                StringBuilder hex = new StringBuilder();
-                for (int j = 0; j < Math.min(60, raw.length()); j++) {
-                    char c = raw.charAt(j);
-                    hex.append(String.format("U+%04X ", (int) c));
-                }
-                log("[SDF1-诊断] L" + (i + 1) + "码点: " + hex.toString().trim());
-            }
-            log("[SDF1-诊断] ===== 原始行抄送完毕 =====");
-            log("[SDF1-诊断] ===== 标准化后内容(前20行) =====");
-            for (int i = 0; i < Math.min(20, rawLines.size()); i++) {
-                String raw = rawLines.get(i).trim();
-                String norm = normalizeText(raw);
-                if (!raw.equals(norm)) {
-                    log("[SDF1-诊断] L" + (i + 1) + " 有变化!");
-                    log("[SDF1-诊断]   原始: [" + raw + "]");
-                    log("[SDF1-诊断]   标准: [" + norm + "]");
-                    StringBuilder hexOrig = new StringBuilder();
-                    StringBuilder hexNorm = new StringBuilder();
-                    for (int j = 0; j < Math.min(40, raw.length()); j++) {
-                        hexOrig.append(String.format("U+%04X ", (int) raw.charAt(j)));
-                    }
-                    for (int j = 0; j < Math.min(40, norm.length()); j++) {
-                        hexNorm.append(String.format("U+%04X ", (int) norm.charAt(j)));
-                    }
-                    log("[SDF1-诊断]   原始码点: " + hexOrig.toString().trim());
-                    log("[SDF1-诊断]   标准码点: " + hexNorm.toString().trim());
-                }
-            }
-            log("[SDF1-诊断] ===== 标准化抄送完毕 =====");
+            // [SDF1-诊断] 逐行打印已注释，仅保留最后配置结果
+            // log("[SDF1-诊断] 文件编码检测: " + encoding.name());
+            // log("[SDF1-诊断] 文件大小: " + f.length() + " 字节");
+            // log("[SDF1-诊断] ===== 原始行内容(前20行) =====");
+            // for (int i = 0; i < Math.min(20, rawLines.size()); i++) {
+            //     String raw = rawLines.get(i);
+            //     log("[SDF1-诊断] L" + (i + 1) + ": [" + raw + "]");
+            //     StringBuilder hex = new StringBuilder();
+            //     for (int j = 0; j < Math.min(60, raw.length()); j++) {
+            //         char c = raw.charAt(j);
+            //         hex.append(String.format("U+%04X ", (int) c));
+            //     }
+            //     log("[SDF1-诊断] L" + (i + 1) + "码点: " + hex.toString().trim());
+            // }
+            // log("[SDF1-诊断] ===== 原始行抄送完毕 =====");
+            // log("[SDF1-诊断] ===== 标准化后内容(前20行) =====");
+            // for (int i = 0; i < Math.min(20, rawLines.size()); i++) {
+            //     String raw = rawLines.get(i).trim();
+            //     String norm = normalizeText(raw);
+            //     if (!raw.equals(norm)) {
+            //         log("[SDF1-诊断] L" + (i + 1) + " 有变化!");
+            //         log("[SDF1-诊断]   原始: [" + raw + "]");
+            //         log("[SDF1-诊断]   标准: [" + norm + "]");
+            //         StringBuilder hexOrig = new StringBuilder();
+            //         StringBuilder hexNorm = new StringBuilder();
+            //         for (int j = 0; j < Math.min(40, raw.length()); j++) {
+            //             hexOrig.append(String.format("U+%04X ", (int) raw.charAt(j)));
+            //         }
+            //         for (int j = 0; j < Math.min(40, norm.length()); j++) {
+            //             hexNorm.append(String.format("U+%04X ", (int) norm.charAt(j)));
+            //         }
+            //         log("[SDF1-诊断]   原始码点: " + hexOrig.toString().trim());
+            //         log("[SDF1-诊断]   标准码点: " + hexNorm.toString().trim());
+            //     }
+            // }
+            // log("[SDF1-诊断] ===== 标准化抄送完毕 =====");
             if (verbose) {
                 log("===== 配置原文 =====");
                 for (int i = 0; i < rawLines.size(); i++)
@@ -404,9 +411,171 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                         log("    动作" + (i + 1) + ": [" + ae.type + "] " + ae.rawText);
                     }
                 }
+                log("优惠券规则数: " + couponRules.size());
+                for (Map.Entry<Integer, Integer> ce
+                        : couponRules.entrySet()) {
+                    log("  " + ce.getKey() + "分 → "
+                            + ce.getValue() + "%");
+                }
+
             }
         } catch (Exception e) { log("[SDF1] 读取失败: " + e.getMessage()); }
     }
+    /**
+     * 供 Sdf1_shop 反射调用
+     * 在计分板中查找优惠券码并核销
+     * @return 折扣百分比(90=9折)，无效返回-1
+     */
+    public int redeemCoupon(String code) {
+        if (cfgCdkObj.isEmpty()
+                || couponRules.isEmpty()) return -1;
+
+        try {
+            Scoreboard board =
+                    Bukkit.getScoreboardManager()
+                            .getMainScoreboard();
+            Objective obj =
+                    board.getObjective(cfgCdkObj);
+            if (obj == null) return -1;
+
+            String canonical = null;
+            int scoreVal = -1;
+
+            // 精确匹配
+            Score s = obj.getScore(code);
+            if (s.isScoreSet()) {
+                canonical = code;
+                scoreVal = s.getScore();
+            }
+
+            // 模糊匹配
+            if (canonical == null) {
+                String normInput =
+                        normalizeForCompare(code);
+                for (String entry : board.getEntries()) {
+                    Score sc = obj.getScore(entry);
+                    if (sc.isScoreSet()
+                            && normalizeForCompare(entry)
+                            .equals(normInput)) {
+                        canonical = entry;
+                        scoreVal = sc.getScore();
+                        break;
+                    }
+                }
+            }
+
+            if (canonical == null) return -1;
+
+            // 查规则：这个分值有对应的优惠券规则吗
+            Integer discount =
+                    couponRules.get(scoreVal);
+            if (discount == null) return -1;
+
+            // 核销：删除该口令
+            consumeCode(canonical, true);
+            log("[优惠券] 核销: \"" + canonical
+                    + "\" 分值=" + scoreVal
+                    + " → " + discount + "%");
+            return discount;
+
+        } catch (Exception e) {
+            log("[优惠券] 异常: " + e.getMessage());
+            return -1;
+        }
+    }
+
+    public int validateCoupon(String code) {
+        log("[优惠券] 输入: \"" + code + "\"");
+        log("[优惠券] 计分板名: \"" + cfgCdkObj + "\"");
+        log("[优惠券] 规则数: " + couponRules.size());
+
+        // ★ 规则丢失时自动重新加载
+        if (cfgCdkObj.isEmpty() || couponRules.isEmpty()) {
+            log("[优惠券] 规则为空，重新加载配置");
+            loadConfig(false);
+            log("[优惠券] 重载后规则数: "
+                    + couponRules.size());
+        }
+
+        if (cfgCdkObj.isEmpty()) {
+            log("[优惠券] 终止: 计分板名为空");
+            return -1;
+        }
+        if (couponRules.isEmpty()) {
+            log("[优惠券] 终止: 无优惠券规则");
+            return -1;
+        }
+        if (cfgCdkObj.isEmpty() || couponRules.isEmpty()) {
+            log("[优惠券] 终止: 重载后仍无规则");
+            return -1;
+        }
+        try {
+            Scoreboard board =
+                    Bukkit.getScoreboardManager()
+                            .getMainScoreboard();
+            Objective obj =
+                    board.getObjective(cfgCdkObj);
+            if (obj == null) {
+                log("[优惠券] 终止: 计分板目标不存在: "
+                        + cfgCdkObj);
+                return -1;
+            }
+
+            String canonical = null;
+            int scoreVal = -1;
+// 在精确匹配之前加：
+            String normalized = normalizeForCompare(code);
+            if (normalized.isEmpty()) {
+                log("[优惠券] 终止: 标准化后为空串");
+                return -1;
+            }
+
+            // 精确匹配
+            Score s = obj.getScore(code);
+            if (s.isScoreSet()) {
+                canonical = code;
+                scoreVal = s.getScore();
+            }
+
+            // 模糊匹配
+            if (canonical == null) {
+                String norm =
+                        normalizeForCompare(code);
+                for (String entry : board.getEntries()) {
+                    Score sc = obj.getScore(entry);
+                    if (sc.isScoreSet()
+                            && normalizeForCompare(entry)
+                            .equals(norm)) {
+                        canonical = entry;
+                        scoreVal = sc.getScore();
+                        break;
+                    }
+                }
+            }
+
+            if (canonical == null) {
+                log("[优惠券] 终止: 计分板中找不到: "
+                        + code);
+                return -1;
+            }
+
+            Integer discount =
+                    couponRules.get(scoreVal);
+            if (discount == null) {
+                log("[优惠券] 终止: 分值" + scoreVal
+                        + " 无对应规则");
+                return -1;
+            }
+
+            log("[优惠券] 验证通过: " + canonical
+                    + " " + discount + "%");
+            return discount;
+        } catch (Exception e) {
+            log("[优惠券] 异常: " + e.getMessage());
+            return -1;
+        }
+    }
+
 
     private void deepParse(List<String> cleanLines, List<String> diag) {
         Map<String, String> globals = new HashMap<String, String>();
@@ -437,7 +606,10 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 continue;
             }
             String[] kv = extractKV(line);
-            if (kv == null) { diag.add("  -> [警告] 无法识别: \"" + line + "\""); continue; }
+            if (kv == null) {
+                diag.add("  -> [警告] 无法识别: \"" + line + "\"");
+                continue;
+            }
             String key = cleanKey(kv[0]);
             String value = kv[1].trim();
             if (key.isEmpty()) continue;
@@ -455,7 +627,10 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 blocks.add(cur);
                 diag.add("  -> [新规则] 分值 = " + value);
             } else if (isKnownBlock(key)) {
-                if (cur == null) { cur = new HashMap<String, String>(); blocks.add(cur); }
+                if (cur == null) {
+                    cur = new HashMap<String, String>();
+                    blocks.add(cur);
+                }
                 cur.put(key, value);
                 diag.add("  -> [块内] " + key + " = \"" + value + "\"");
             } else {
@@ -470,6 +645,11 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         cfgNameBoard = safeStr(globals.get("记名板"));
         cfgAdminTeam = safeStr(globals.get("管理团队"));
         cfgAdminTag = safeStr(globals.get("管理标签"));
+        cfgCouponBoard = cfgCdkObj;
+        couponRules.clear();
+        parseCouponRules(cleanLines);
+
+
 
         for (Map<String, String> block : blocks) {
             int scoreKey = safeInt(block.get("分值"));
@@ -556,6 +736,36 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         configLoaded = !cfgCdkObj.isEmpty();
     }
 
+    private void parseCouponRules(List<String> lines) {
+        couponRules.clear();
+        for (String line : lines) {
+            String t = line.trim();
+            if (t.isEmpty()) continue;
+            // 去掉行内注释
+            int hash = t.indexOf('#');
+            int slash = t.indexOf("//");
+            int cut = -1;
+            if (hash >= 0 && slash >= 0)
+                cut = Math.min(hash, slash);
+            else if (hash >= 0) cut = hash;
+            else if (slash >= 0) cut = slash;
+            if (cut >= 0) t = t.substring(0, cut).trim();
+            if (t.isEmpty()) continue;
+            java.util.regex.Matcher m =
+                    java.util.regex.Pattern
+                            .compile("(\\d+)\\s*[=＝]\\s*(\\d+)")
+                            .matcher(t);
+            while (m.find()) {
+                int s = Integer.parseInt(m.group(1));
+                int d = Integer.parseInt(m.group(2));
+                if (s > 0 && d > 0) {
+                    couponRules.put(s, d);
+                }
+            }
+        }
+    }
+
+
     private void parseNaturalAction(Map<String, String> block, String text, List<String> diag) {
         text = text.replaceAll("^['\"](.*)['\"]$", "$1").trim();
         text = normalizeText(text);
@@ -569,8 +779,49 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         norm = normalizeChineseNumbers(norm);
         log("[SDF1-诊断-动作] 归一化: [" + norm + "]");
 
-        // ★ 债券检测（含债券盲盒）
+        // ★ 直接中文数字范围检测（归一化之前的安全网）
+        // 处理"壹佰到贰仟个债券盲盒"等纯中文数字范围
         if (norm.contains("债券")) {
+            String cnBondRange = "([零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+)"
+                    + "\\s*[~\\-到至]+\\s*"
+                    + "([零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+)"
+                    + "\\s*个?\\s*债券盲盒";
+            Matcher cnRangeM = Pattern.compile(cnBondRange).matcher(norm);
+            if (cnRangeM.find()) {
+                int bmin = parseChineseNum(cnRangeM.group(1));
+                int bmax = parseChineseNum(cnRangeM.group(2));
+                if (bmin > 0 && bmax > 0) {
+                    if (bmin > bmax) { int t2 = bmin; bmin = bmax; bmax = t2; }
+                    block.put("_债券盲盒", "true");
+                    block.put("_债券盲盒_min", String.valueOf(bmin));
+                    block.put("_债券盲盒_max", String.valueOf(bmax));
+                    diag.add("    -> 识别(中文范围): 债券盲盒 " + bmin + "~" + bmax);
+                }
+            }
+            // 也检测"债券盲盒 壹佰到贰仟个"（关键词在前的格式）
+            if (!"true".equals(block.get("_债券盲盒"))) {
+                String cnBondRange2 = "债券盲盒\\s*"
+                        + "([零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+)"
+                        + "\\s*[~\\-到至]+\\s*"
+                        + "([零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+)"
+                        + "\\s*个?";
+                Matcher cnRangeM2 = Pattern.compile(cnBondRange2).matcher(norm);
+                if (cnRangeM2.find()) {
+                    int bmin = parseChineseNum(cnRangeM2.group(1));
+                    int bmax = parseChineseNum(cnRangeM2.group(2));
+                    if (bmin > 0 && bmax > 0) {
+                        if (bmin > bmax) { int t2 = bmin; bmin = bmax; bmax = t2; }
+                        block.put("_债券盲盒", "true");
+                        block.put("_债券盲盒_min", String.valueOf(bmin));
+                        block.put("_债券盲盒_max", String.valueOf(bmax));
+                        diag.add("    -> 识别(中文范围): 债券盲盒 " + bmin + "~" + bmax);
+                    }
+                }
+            }
+        }
+
+        // ★ 债券检测（含债券盲盒）
+        if (!"true".equals(block.get("_债券盲盒")) && norm.contains("债券")) {
             // 先检测范围：X~Y个债券盲盒
             Matcher bondBlindM = Pattern.compile(
                     "(\\d+)\\s*[~\\-到至]+\\s*(\\d+)\\s*个?\\s*债券盲盒"
@@ -789,21 +1040,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         if (s == null || s.trim().isEmpty()) return 0;
         s = s.trim();
         try { return Integer.parseInt(s); } catch (Exception e) {}
-        int result = 0;
-        int current = 0;
-        for (int i = 0; i < s.length(); i++) {
-            String ch = s.substring(i, i + 1);
-            Integer val = CN_NUMS.get(ch);
-            if (val == null) continue;
-            if (val >= 10) {
-                if (current == 0) current = 1;
-                result += current * val;
-                current = 0;
-            } else {
-                current = val;
-            }
-        }
-        return result + current;
+        // ★ 中文数字统一用 parseChineseNum 解析（支持万/亿分节）
+        return parseChineseNum(s);
     }
 
     private String normalizeAllDigits(String s) {
@@ -823,7 +1061,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private String normalizeMixedNumbers(String text) {
-        Matcher m1 = Pattern.compile("(\\d+)([万亿])(\\d+)?([千万百十])?").matcher(text);
+        // ★ 匹配数字+中文单位（包括繁体：佰仟）
+        Matcher m1 = Pattern.compile("(\\d+)([万亿])(\\d+)?([千万百十佰仟])?").matcher(text);
         StringBuffer sb1 = new StringBuffer();
         while (m1.find()) {
             int num = Integer.parseInt(m1.group(1));
@@ -837,7 +1076,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             m1.appendReplacement(sb1, String.valueOf(result));
         }
         m1.appendTail(sb1);
-        Matcher m2 = Pattern.compile("(\\d+)([千万百十])").matcher(sb1.toString());
+        // ★ 匹配数字+中文单位（包括繁体：佰仟）
+        Matcher m2 = Pattern.compile("(\\d+)([千万百十佰仟])").matcher(sb1.toString());
         StringBuffer sb2 = new StringBuffer();
         while (m2.find()) {
             int num = Integer.parseInt(m2.group(1));
@@ -851,6 +1091,14 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private String normalizeChineseNumbers(String text) {
+        // ★ 预处理：移除中文数字之间的不可见字符（零宽空格等）
+        // 防止"壹佰"被拆分为"壹"和"佰"导致解析为1100
+        text = text.replaceAll(
+                "(?<=[零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两])"
+                + "[\\s\\u00A0\\u200B\\u200C\\u200D\\u2060\\uFE0F\\u180E\\u2028\\u2029\\u3000\\u00AD]*"
+                + "(?=[零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两])",
+                ""
+        );
         Matcher m = Pattern.compile(
                 "[零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+"
         ).matcher(text);
@@ -937,7 +1185,10 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         if (s == null) return "";
         return s.replace('－', '-').replace('–', '-').replace('—', '-')
                 .replace('−', '-').replace('～', '~')
-                .replace("​", "").replace("﻿", "");
+                .replace("​", "").replace("﻿", "")
+                // ★ 清理更多不可见 Unicode 字符
+                .replaceAll("[\\u200B\\u200C\\u200D\\u2060\\uFE0F\\u180E"
+                        + "\\u2028\\u2029\\u00AD\\u00A0]", "");
     }
 
     private int parseChineseNum(String s) {
@@ -1079,9 +1330,16 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private boolean isKnownGlobal(String key) {
-        return key.equals("计分板") || key.equals("记名板") || key.equals("联控插件")
-                || key.equals("版本号") || key.equals("更新通道") || key.equals("联控模式")
-                || key.equals("管理团队") || key.equals("管理标签");
+        if (key.equals("计分板")) return true;
+        if (key.equals("记名板")) return true;
+        if (key.equals("联控插件")) return true;
+        if (key.equals("版本号")) return true;
+        if (key.equals("更新通道")) return true;
+        if (key.equals("联控模式")) return true;
+       // if (key.equals("管理团队")) return true;
+        if (key.equals("管理标签")) return true;
+        if (key.equals("优惠券规则")) return true;
+        return false;
     }
 
     private boolean isKnownBlock(String key) {
@@ -1216,9 +1474,9 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             String trimmed = raw.trim();
             String ln = String.format("L%02d", i + 1);
             if (trimmed.isEmpty()) { diag.add(ln + ": (空行)"); result.add(""); continue; }
-            if (inBlock) {
-                int endIdx = trimmed.indexOf("*/");
-                if (endIdx >= 0) { inBlock = false; String after = trimmed.substring(endIdx + 2).trim(); result.add(after.isEmpty() ? "" : after); }
+        /*    if (inBlock) {
+                int endIdx = trimmed.indexOf("*///");
+            /*    if (endIdx >= 0) { inBlock = false; String after = trimmed.substring(endIdx + 2).trim(); result.add(after.isEmpty() ? "" : after); }
                 else { result.add(""); }
                 diag.add(ln + ": [踢除块注释中]"); totalComments++; continue;
             }
@@ -1227,14 +1485,14 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 if (endIdx >= 0) { inHtml = false; String after = trimmed.substring(endIdx + 3).trim(); result.add(after.isEmpty() ? "" : after); }
                 else { result.add(""); }
                 diag.add(ln + ": [踢除HTML注释中]"); totalComments++; continue;
-            }
-            if (trimmed.contains("/*")) {
-                int bs = trimmed.indexOf("/*"); int be = trimmed.indexOf("*/", bs + 2);
-                if (be >= 0) { String b = trimmed.substring(0, bs).trim(); String a = trimmed.substring(be + 2).trim(); result.add((b + " " + a).trim()); }
+            }*/
+       /*     if (trimmed.contains("/*")) {
+           /*     int bs = trimmed.indexOf("/*"); int be = trimmed.indexOf("*///", bs + 2);
+             /*   if (be >= 0) { String b = trimmed.substring(0, bs).trim(); String a = trimmed.substring(be + 2).trim(); result.add((b + " " + a).trim()); }
                 else { inBlock = true; String b = trimmed.substring(0, bs).trim(); result.add(b.isEmpty() ? "" : b); }
                 diag.add(ln + ": [踢除块注释]"); totalComments++; continue;
-            }
-            if (trimmed.contains("<!--")) {
+            }*/
+           /* if (trimmed.contains("<!--")) {
                 int hs = trimmed.indexOf("<!--"); int he = trimmed.indexOf("-->", hs + 4);
                 if (he >= 0) { inHtml = false; String b = trimmed.substring(0, hs).trim(); String a = trimmed.substring(he + 3).trim(); result.add((b + " " + a).trim()); }
                 else { inHtml = true; String b = trimmed.substring(0, hs).trim(); result.add(b.isEmpty() ? "" : b); }
@@ -1242,14 +1500,14 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             }
             if (trimmed.startsWith("#") || trimmed.startsWith("//")) {
                 diag.add(ln + ": [踢除整行注释]"); result.add(""); totalComments++; continue;
-            }
+            }*/
             int hashIdx = findUnquoted(trimmed, '#');
             if (hashIdx >= 0) { trimmed = trimmed.substring(0, hashIdx).trim(); totalInline++; }
             int slashIdx = findUnquoted(trimmed, '/');
             if (slashIdx >= 0 && slashIdx + 1 < trimmed.length() && trimmed.charAt(slashIdx + 1) == '/') {
                 trimmed = trimmed.substring(0, slashIdx).trim(); totalInline++;
             }
-            diag.add(ln + ": [保留] \"" + trimmed + "\"");
+      //      diag.add(ln + ": [保留] \"" + trimmed + "\"");
             result.add(trimmed);
         }
         diag.add("总行: " + rawLines.size() + " | 注释: " + totalComments + " | 有效行: " + result.size());
@@ -1349,8 +1607,37 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
      */
     private String normalizeForCompare(String s) {
         if (s == null) return "";
-        return s.replaceAll("[^a-zA-Z0-9]", "").toLowerCase();
+        StringBuilder sb = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            // 全角→半角（数字）
+            if (c >= '\uFF10' && c <= '\uFF19') {
+                sb.append((char)(c - 0xFF10 + '0'));
+            }
+            // 全角→半角（大写字母）
+            else if (c >= '\uFF21' && c <= '\uFF3A') {
+                sb.append((char)(c - 0xFF21 + 'A'));
+            }
+            // 全角→半角（小写字母）
+            else if (c >= '\uFF41' && c <= '\uFF5A') {
+                sb.append((char)(c - 0xFF41 + 'a'));
+            }
+            // ★ 保留中文
+            else if ((c >= '\u4E00' && c <= '\u9FFF')
+                    || (c >= '\u3400' && c <= '\u4DBF')) {
+                sb.append(c);
+            }
+            // 保留半角字母和数字
+            else if ((c >= 'A' && c <= 'Z')
+                    || (c >= 'a' && c <= 'z')
+                    || (c >= '0' && c <= '9')) {
+                sb.append(c);
+            }
+            // 分隔符丢弃
+        }
+        return sb.toString().toLowerCase();
     }
+
 
 
     private void consumeCode(String code, boolean deleteCode) {
@@ -1892,9 +2179,18 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         }
         if (!checkAdminSilent(s)) { showHelp(s); return true; }
         if (sub.equals("status")) {
-            s.sendMessage("[SDF1] v" + cfgVer + " 计分板:" + cfgCdkObj + " 记名板:" + (cfgNameBoard.isEmpty() ? "(未设置)" : cfgNameBoard) + " 规则:" + scoreMap.size() + " 联控:" + cyPing() + " Vault:" + (economy != null ? economy.getName() : "无"));
+            s.sendMessage("[SDF1] v" + cfgVer
+                    + " 计分板:" + cfgCdkObj
+                    + " 记名板:" + (cfgNameBoard.isEmpty()
+                    ? "(未设置)" : cfgNameBoard)
+                    + " 规则:" + scoreMap.size()
+                    + " 优惠券规则:" + couponRules.size()
+                    + " 联控:" + cyPing()
+                    + " Vault:" + (economy != null
+                    ? economy.getName() : "无"));
             return true;
         }
+
         if (sub.equals("reload")) {
             scoreMap.clear(); configLoaded = false; cdksWarned = false; listening.clear(); failCount = 0; circuitBroken = false;
             loadConfig(true); discoverCyPlugin(); setupEconomy();
@@ -2131,7 +2427,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     }
 
     private void checkUpdate(final CommandSender manual) {
-        String checkingMsg = "[SDF1] 正在检查更新..."; log(checkingMsg);
+        String checkingMsg = "正在检查更新..."; log(checkingMsg);
         if (manual != null) manual.sendMessage(checkingMsg);
         new Thread(new Runnable() { public void run() {
             try {
@@ -2143,28 +2439,38 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 log("[更新] " + pName + " 失败，切换 " + bName);
                 result = fetchRelease(bApi, bName);
                 if (result != null) { applyUpdate(result[0], result[1], bDl, manual, bName); return; }
-                log("[更新] 双路均失败");
+                log("双路均失败");
                 if (manual != null) manual.sendMessage("[更新] 检查失败");
-            } catch (Exception e) { log("[更新] 异常: " + e.getMessage()); }
+            } catch (Exception e) { log("异常: " + e.getMessage()); }
         }}).start();
     }
 
     private String[] fetchRelease(String apiUrl, String ch) {
+        HttpURLConnection c = null;
         try {
             TrustManager[] trustAll = new TrustManager[]{new X509TrustManager(){public X509Certificate[] getAcceptedIssuers(){return null;}public void checkClientTrusted(X509Certificate[] c,String a){}public void checkServerTrusted(X509Certificate[] c,String a){}}};
             SSLContext sc = SSLContext.getInstance("TLS"); sc.init(null, trustAll, new java.security.SecureRandom());
-            URL url = new URL(apiUrl); HttpURLConnection c = (HttpURLConnection) url.openConnection();
+            URL url = new URL(apiUrl); c = (HttpURLConnection) url.openConnection();
             if (c instanceof HttpsURLConnection) { HttpsURLConnection hc = (HttpsURLConnection) c; hc.setSSLSocketFactory(sc.getSocketFactory()); hc.setHostnameVerifier(new javax.net.ssl.HostnameVerifier(){public boolean verify(String h,javax.net.ssl.SSLSession sess){return true;}}); }
-            c.setRequestMethod("GET"); c.setRequestProperty("User-Agent", "Mozilla/5.0 SDF1-Plugin/1.0"); c.setRequestProperty("Accept", "application/vnd.github.v3+json");
+            c.setRequestMethod("GET"); c.setRequestProperty("User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+            c.setRequestProperty("Accept", "*/*");
+            c.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
             c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setInstanceFollowRedirects(true);
             int code = c.getResponseCode();
-            if (code != 200) { log("[更新] " + ch + " HTTP " + code); try{c.getErrorStream().close();}catch(Exception ignored){} return null; }
-            String json = readStream(c.getInputStream()); c.disconnect();
-            if (json == null || json.isEmpty()) { log("[更新] " + ch + " 响应为空"); return null; }
+            if (code != 200) { log(ch + " HTTP " + code); return null; }
+            String json = readStream(c.getInputStream());
+            if (json == null || json.isEmpty()) { log(ch + " 响应为空"); return null; }
             String rv = jParse(json, "tag_name"); String rn = jParse(json, "body");
             if (rv == null || rv.isEmpty()) return null;
             return new String[]{rv, rn != null ? rn : ""};
-        } catch (Exception e) { log("[更新] " + ch + " " + e.getMessage()); return null; }
+        } catch (Exception e) {
+            log(ch + " " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return null;
+        } finally {
+            if (c != null) c.disconnect();
+        }
     }
 
     private String readStream(InputStream is) {
@@ -2174,11 +2480,25 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
     private void applyUpdate(String rv, String notes, String dlLink, CommandSender manual, String ch) {
         remoteVer = rv;
-        if (!rv.equals(cfgVer)) {
-            String msg = "[SDF1] 新版本! v" + cfgVer + " -> v" + rv; log(msg); log("下载: " + dlLink);
-            if (manual != null) { manual.sendMessage(msg); manual.sendMessage("下载: " + dlLink); }
-            for (Player op : Bukkit.getOnlinePlayers()) { if (op.isOp()) { op.sendMessage(msg); op.sendMessage("下载: " + dlLink); } }
-        } else { log("[更新] 已是最新 v" + cfgVer); if (manual != null) manual.sendMessage("[SDF1] 已是最新 v" + cfgVer); }
+        // 版本比较：远程≠本地即视为有更新（用户即将推新版本）
+        if (!rv.trim().equals(cfgVer.trim())) {
+            // 使用Bukkit.getConsoleSender().sendMessage()输出彩色日志
+            Bukkit.getConsoleSender().sendMessage("§a[Sdf1] §e新版本! v" + cfgVer + " -> v" + rv);
+            Bukkit.getConsoleSender().sendMessage("§a[Sdf1] §b§l下载: " + dlLink);
+            if (manual != null) { manual.sendMessage("§a[Sdf1] §e新版本! v" + cfgVer + " -> v" + rv); manual.sendMessage("§a[Sdf1] §b§l下载: " + dlLink); }
+            for (Player op : Bukkit.getOnlinePlayers()) { if (op.isOp()) { op.sendMessage("§a[Sdf1] §e新版本! v" + cfgVer + " -> v" + rv); op.sendMessage("§a[Sdf1] §b§l下载: " + dlLink); } }
+        } else {
+            Bukkit.getConsoleSender().sendMessage("§a[Sdf1] §7已是最新 v" + cfgVer);
+            if (manual != null) manual.sendMessage("§a[Sdf1] §7已是最新 v" + cfgVer);
+        }
+    }
+
+    private int parseVersionNum(String s) {
+        try {
+            return Integer.parseInt(s.replaceAll("[^0-9]", ""));
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     private static String jParse(String j, String k) {
