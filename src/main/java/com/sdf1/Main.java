@@ -64,6 +64,10 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     private static final String API_GE = "https://gitee.com/api/v5/repos/nihaoshidifu/sdf1_plugn/releases/latest";
     private static final String DL_GH = "https://github.com/ypsdf1/sdf1_plugn/releases";
     private static final String DL_GE = "https://gitee.com/nihaoshidifu/sdf1_plugn/releases";
+
+    // 第三路备选：宝塔静态HTML
+    private static final String FALLBACK_HTML = "https://caoyuan.ypshidifu.cn/update_check.html";
+
     private static final String[] CY_DISCOVER_NAMES = {"CY_beibao", "CY", "cy_beibao", "Cy", "cy"};
     private Plugin discoveredCy = null;
     private java.lang.reflect.Method discoveredCyActivate = null;
@@ -2439,8 +2443,16 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 log("[更新] " + pName + " 失败，切换 " + bName);
                 result = fetchRelease(bApi, bName);
                 if (result != null) { applyUpdate(result[0], result[1], bDl, manual, bName); return; }
-                log("双路均失败");
-                if (manual != null) manual.sendMessage("[更新] 检查失败");
+                // ★ 双路均失败，尝试第三路备选（宝塔静态HTML）
+                log("[更新] GitHub/Gitee 均失败，尝试第三路备选 BaoTa...");
+                String[] fbResult = tryFallbackChannel();
+                if (fbResult != null) {
+                    log("[更新] 第三路备选 BaoTa 检查成功: " + fbResult[0]);
+                    applyUpdate(fbResult[0], fbResult[1], DL_GH, manual, "BaoTa");
+                    return;
+                }
+                log("[更新] 三路均失败");
+                if (manual != null) manual.sendMessage("[更新] 检查失败（含宝塔备选）");
             } catch (Exception e) { log("异常: " + e.getMessage()); }
         }}).start();
     }
@@ -2452,14 +2464,21 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             SSLContext sc = SSLContext.getInstance("TLS"); sc.init(null, trustAll, new java.security.SecureRandom());
             URL url = new URL(apiUrl); c = (HttpURLConnection) url.openConnection();
             if (c instanceof HttpsURLConnection) { HttpsURLConnection hc = (HttpsURLConnection) c; hc.setSSLSocketFactory(sc.getSocketFactory()); hc.setHostnameVerifier(new javax.net.ssl.HostnameVerifier(){public boolean verify(String h,javax.net.ssl.SSLSession sess){return true;}}); }
-            c.setRequestMethod("GET"); c.setRequestProperty("User-Agent",
+            c.setRequestMethod("GET");
+            c.setRequestProperty("User-Agent",
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                            + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+                            + "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
             c.setRequestProperty("Accept", "*/*");
-            c.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9");
+            c.setRequestProperty("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8");
+            c.setRequestProperty("Connection", "keep-alive");
             c.setConnectTimeout(15000); c.setReadTimeout(15000); c.setInstanceFollowRedirects(true);
             int code = c.getResponseCode();
-            if (code != 200) { log(ch + " HTTP " + code); return null; }
+            if (code != 200) {
+                String errBody = "";
+                try { errBody = readStream(c.getErrorStream()); } catch (Exception ignored) {}
+                log(ch + " HTTP " + code + (errBody.isEmpty() ? "" : " | " + errBody.substring(0, Math.min(errBody.length(), 200))));
+                return null;
+            }
             String json = readStream(c.getInputStream());
             if (json == null || json.isEmpty()) { log(ch + " 响应为空"); return null; }
             String rv = jParse(json, "tag_name"); String rn = jParse(json, "body");
@@ -2476,6 +2495,80 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     private String readStream(InputStream is) {
         try { BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8)); StringBuilder sb = new StringBuilder(); String line; while ((line = reader.readLine()) != null) sb.append(line); reader.close(); return sb.toString(); }
         catch (Exception e) { log("[更新] 读取流失败: " + e.getMessage()); return null; }
+    }
+
+    /**
+     * 第三路备选：从宝塔静态HTML解析版本信息
+     * HTML中用 <!--UPDATE_DATA 包裹结构化数据：
+     * pluginName|version|downloadLink
+     */
+    private String[] tryFallbackChannel() {
+        HttpURLConnection conn = null;
+        try {
+            URL url = new URL(FALLBACK_HTML);
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("User-Agent", "Sdf1-Plugin-UpdateChecker/1.0");
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(5000);
+            conn.setInstanceFollowRedirects(true);
+
+            int code = conn.getResponseCode();
+            if (code != 200) {
+                log("[更新] BaoTa: HTTP " + code);
+                return null;
+            }
+
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(conn.getInputStream(), "UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                sb.append(line).append("\n");
+            }
+            reader.close();
+
+            // 解析 <!--UPDATE_DATA ... UPDATE_DATA--> 块
+            String html = sb.toString();
+            int start = html.indexOf("<!--UPDATE_DATA");
+            int end = html.indexOf("UPDATE_DATA-->");
+            if (start < 0 || end < 0 || end <= start) {
+                log("[更新] BaoTa: 无法解析更新数据块");
+                return null;
+            }
+            String block = html.substring(start, end);
+
+            // ★ 去除 Cloudflare 注入的 CDN-CGI 链接（<a href=...>...</a>）
+            block = block.replaceAll("<a\\s[^>]*>[^<]*</a>", "");
+
+            // 逐行查找匹配 sdf1 的记录
+            String[] lines = block.split("\n");
+            for (String l : lines) {
+                l = l.trim();
+                // 跳过空行、注释标记行、HTML注入标签
+                if (l.isEmpty() || l.startsWith("<!--") || l.startsWith("<")) continue;
+                if (l.startsWith("sdf1|")) {
+                    // 格式: sdf1|1.0|https://...
+                    String[] parts = l.split("\\|");
+                    if (parts.length >= 2) {
+                        String ver = parts[1].trim();
+                        return new String[]{ver, ""};
+                    }
+                }
+            }
+
+            log("[更新] BaoTa: 未找到 sdf1 的版本信息");
+            return null;
+
+        } catch (java.net.SocketTimeoutException e) {
+            log("[更新] BaoTa: 连接超时");
+            return null;
+        } catch (Exception e) {
+            log("[更新] BaoTa: " + e.getMessage());
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
     }
 
     private void applyUpdate(String rv, String notes, String dlLink, CommandSender manual, String ch) {
