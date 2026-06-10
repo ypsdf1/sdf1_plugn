@@ -69,6 +69,6 @@ cdk2
 [bbsmc分流](https://bbsmc.net/plugin/sdf1money)
 
 ## 插件源码：
-- [github](https://github.com/ypsdf1/sdf1_plugn)
+- [github](https://gitcode.com/ypsdf1/Sdf1)
 - [gitee](https://gitee.com/nihaoshidifu/sdf1_plugn)
 
