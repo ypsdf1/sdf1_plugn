@@ -62,11 +62,170 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     private String remoteVer = "";
     private static final String API_GH = "https://api.github.com/repos/ypsdf1/sdf1_plugn/releases/latest";
     private static final String API_GE = "https://gitee.com/api/v5/repos/nihaoshidifu/sdf1_plugn/releases/latest";
+    private static final String API_GITCODE = "https://gitcode.com/api/v5/repos/ypsdf1/Sdf1/releases/latest";
     private static final String DL_GH = "https://github.com/ypsdf1/sdf1_plugn/releases";
     private static final String DL_GE = "https://gitee.com/nihaoshidifu/sdf1_plugn/releases";
+    private static final String DL_GITCODE = "https://gitcode.com/ypsdf1/Sdf1/releases";
+
+    // ★ git.ypshidifu.cn 私有仓库（优先级最高）— Gitea API格式
+    private static final String API_GYP = "https://git.ypshidifu.cn/api/v1/repos/youpaishidifu/sdf1_plugin/releases/latest";
+    private static final String DL_GYP = "https://git.ypshidifu.cn/youpaishidifu/sdf1_plugin/releases";
 
     // 第三路备选：宝塔静态HTML
     private static final String FALLBACK_HTML = "https://caoyuan.ypshidifu.cn/update_check.html";
+
+    // ★ CDK远程验证：pending队列 + 结果映射（供Sdf1_login轮询读写）
+    // Sdf1_login通过反射调用 submitCdkValidation / getCdkValidationResult / setCdkValidationResult
+    private static final java.util.concurrent.ConcurrentLinkedQueue<String[]> pendingCdkValidations = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private static final java.util.concurrent.ConcurrentHashMap<String, String[]> cdkValidationResults = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 提交CDK远程验证请求（供本插件调用）
+     * @return requestId
+     */
+    public static String submitCdkValidation(String code, String player) {
+        String requestId = "SDF1_" + System.currentTimeMillis() + "_" + Integer.toHexString(code.hashCode());
+        pendingCdkValidations.add(new String[]{requestId, code, player});
+        return requestId;
+    }
+
+    /**
+     * Sdf1_login轮询：拉取pending请求（返回后清除）
+     */
+    public static String[][] pullPendingCdkValidations() {
+        java.util.List<String[]> list = new java.util.ArrayList<>();
+        String[] item;
+        while ((item = pendingCdkValidations.poll()) != null) {
+            list.add(item);
+        }
+        return list.toArray(new String[0][]);
+    }
+
+    /**
+     * Sdf1_login推送验证结果
+     */
+    public static void setCdkValidationResult(String requestId, String status, int amount) {
+        cdkValidationResults.put(requestId, new String[]{status, String.valueOf(amount)});
+    }
+
+    /**
+     * 获取验证结果并清除（只读一次）
+     */
+    public static String[] getCdkValidationResult(String requestId) {
+        return cdkValidationResults.remove(requestId);
+    }
+
+    /**
+     * ★ Sdf1_login调用：检查计分板CDK是否存在 + 获取债券总额
+     * 当CDKManager.redeem()找不到CDK时，回退到计分板检查
+     * @return new String[]{"success", 总债券额} 或 {"not_found"} 或 {"not_bond"}
+     */
+    public String[] checkScoreBoardCdk(String code) {
+        try {
+            log("[CDK-远程验证] checkScoreBoardCdk开始 code=" + code
+                + " configLoaded=" + configLoaded + " cfgCdkObj=" + cfgCdkObj
+                + " scoreMapSize=" + scoreMap.size());
+
+            int scoreVal = lookupScore(code);
+            log("[CDK-远程验证] lookupScore结果: " + code + " → scoreVal=" + scoreVal);
+            if (scoreVal < 0) return new String[]{"not_found"};
+
+            ScoreAction sa = scoreMap.get(scoreVal);
+            log("[CDK-远程验证] scoreMap.get(" + scoreVal + ") → " + (sa != null ? "找到" : "null"));
+            if (sa == null) return new String[]{"not_found"};
+
+            // ★ 泛解析：遍历所有动作的rawText，提取债券金额（宝宝化识别）
+            int totalBond = 0;
+            for (ActionEntry ae : sa.actions) {
+                int parsed = parseBondFromText(ae.rawText);
+                log("[CDK-远程验证] 动作: type=" + ae.type + " rawText=\"" + ae.rawText + "\" 解析债券=" + parsed);
+                if (parsed > 0) {
+                    totalBond += parsed;
+                }
+            }
+            log("[CDK-远程验证] 总债券=" + totalBond + " deleteCode=" + sa.deleteCode);
+            if (totalBond <= 0) return new String[]{"not_bond"};
+
+            // 删除口令（如果规则配置了删除）
+            if (sa.deleteCode) {
+                consumeCode(code, true);
+                log("[CDK-远程验证] 计分板CDK核销: \"" + code + "\" 债券=" + totalBond);
+            }
+
+            return new String[]{"success", String.valueOf(totalBond)};
+        } catch (Exception e) {
+            log("[CDK-远程验证] checkScoreBoardCdk异常: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            e.printStackTrace();
+            return new String[]{"not_found"};
+        }
+    }
+
+    /**
+     * ★ 泛解析：从动作文本中提取债券金额
+     * 支持各种表述方式，就像sdf1解析设置.txt一样
+     * @return 债券金额，0表示未识别到
+     */
+    private int parseBondFromText(String text) {
+        if (text == null || text.isEmpty()) return 0;
+        String norm = text.toLowerCase()
+            .replace('０', '0').replace('１', '1').replace('２', '2').replace('３', '3').replace('４', '4')
+            .replace('５', '5').replace('６', '6').replace('７', '7').replace('８', '8').replace('９', '9')
+            .replace('－', '-').replace('～', '~').replace('—', '-');
+
+        // 1. 债券盲盒范围：X~Y个债券盲盒 / X到Y个债券 / 抽个债券盲盒，X到Y
+        // 先找范围模式
+        java.util.regex.Matcher rangeM = java.util.regex.Pattern.compile(
+            "(\\d+)\\s*[~\\-到至]\\s*(\\d+)\\s*个?\\s*(?:债券|盲盒)"
+        ).matcher(norm);
+        if (rangeM.find()) {
+            int bmin = Integer.parseInt(rangeM.group(1));
+            int bmax = Integer.parseInt(rangeM.group(2));
+            if (bmin > bmax) { int t = bmin; bmin = bmax; bmax = t; }
+            return (bmin + bmax) / 2; // 取平均值
+        }
+
+        // 2. 债券盲盒范围（关键词在前）：债券盲盒 X~Y个
+        java.util.regex.Matcher rangeM2 = java.util.regex.Pattern.compile(
+            "债券盲盒\\s*(\\d+)\\s*[~\\-到至]\\s*(\\d+)"
+        ).matcher(norm);
+        if (rangeM2.find()) {
+            int bmin = Integer.parseInt(rangeM2.group(1));
+            int bmax = Integer.parseInt(rangeM2.group(2));
+            if (bmin > bmax) { int t = bmin; bmin = bmax; bmax = t; }
+            return (bmin + bmax) / 2;
+        }
+
+        // 3. 中文数字范围：壹佰到贰仟个债券盲盒
+        java.util.regex.Matcher cnRangeM = java.util.regex.Pattern.compile(
+            "([零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+)\\s*[~\\-到至]+\\s*([零一二三四五六七八九十百千万亿壹贰叁肆伍陆柒捌玖拾佰仟两]+)\\s*个?\\s*(?:债券|盲盒)"
+        ).matcher(norm);
+        if (cnRangeM.find()) {
+            int bmin = parseChineseNum(cnRangeM.group(1));
+            int bmax = parseChineseNum(cnRangeM.group(2));
+            if (bmin > 0 && bmax > 0) {
+                if (bmin > bmax) { int t = bmin; bmin = bmax; bmax = t; }
+                return (bmin + bmax) / 2;
+            }
+        }
+
+        // 4. 固定债券：X个债券 / X块债券 / X枚债券 / 给玩家X债券
+        java.util.regex.Matcher fixedM = java.util.regex.Pattern.compile(
+            "(\\d+)\\s*[个块枚元]?\\s*债券"
+        ).matcher(norm);
+        if (fixedM.find()) {
+            return Integer.parseInt(fixedM.group(1));
+        }
+
+        // 5. 债券在前：债券X个
+        java.util.regex.Matcher fixedM2 = java.util.regex.Pattern.compile(
+            "债券\\s*(\\d+)"
+        ).matcher(norm);
+        if (fixedM2.find()) {
+            return Integer.parseInt(fixedM2.group(1));
+        }
+
+        return 0;
+    }
 
     private static final String[] CY_DISCOVER_NAMES = {"CY_beibao", "CY", "cy_beibao", "Cy", "cy"};
     private Plugin discoveredCy = null;
@@ -77,6 +236,11 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     private String cfgCouponBoard = "";
     private final Map<Integer, Integer> couponRules
             = new HashMap<>();
+
+    // ★ 文件导入黑名单：后缀名集合（小写，含点号）
+    private final Set<String> blacklistExtensions = new HashSet<>();
+    private static final String BLACKLIST_FILE = "黑名单.txt";
+    private static final String[] DEFAULT_BLACKLIST = {".ps1", ".sh", ".bat", ".exe"};
 
 
     private static final Map<String, String> ALIASES = new HashMap<String, String>();
@@ -205,6 +369,7 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         log("[SDF1] ===== 启动 =====");
         extractDefaultConfig();
         loadConfig(true);
+        loadBlacklist();
         setupEconomy();
         discoverCyPlugin();
         getCommand("sdf1").setExecutor(this);
@@ -221,6 +386,62 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     public void onDisable() { log("卸载"); listening.clear(); }
 
     private void log(String msg) { getLogger().info(msg); }
+
+    // ★ 加载文件导入黑名单
+    private void loadBlacklist() {
+        blacklistExtensions.clear();
+        // 加载默认黑名单
+        for (String ext : DEFAULT_BLACKLIST) {
+            blacklistExtensions.add(ext.toLowerCase());
+        }
+        // 从文件加载（覆盖默认）
+        File f = new File(getDataFolder(), BLACKLIST_FILE);
+        if (!f.exists()) {
+            // 首次运行：创建默认黑名单文件
+            try {
+                getDataFolder().mkdirs();
+                PrintWriter pw = new PrintWriter(
+                        new OutputStreamWriter(
+                                new FileOutputStream(f), StandardCharsets.UTF_8));
+                for (String ext : DEFAULT_BLACKLIST) {
+                    pw.println(ext);
+                }
+                pw.close();
+                log("[黑名单] 已创建默认黑名单: " + BLACKLIST_FILE);
+            } catch (Exception e) {
+                log("[黑名单] 创建文件失败: " + e.getMessage());
+            }
+            return;
+        }
+        try {
+            BufferedReader r = new BufferedReader(
+                    new InputStreamReader(
+                            new FileInputStream(f), StandardCharsets.UTF_8));
+            String line;
+            int count = 0;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty() || line.startsWith("#")) continue;
+                // 确保以点号开头
+                if (!line.startsWith(".")) line = "." + line;
+                blacklistExtensions.add(line.toLowerCase());
+                count++;
+            }
+            r.close();
+            log("[黑名单] 加载 " + count + " 个后缀规则");
+        } catch (Exception e) {
+            log("[黑名单] 读取失败: " + e.getMessage());
+        }
+    }
+
+    // ★ 检查文件后缀是否在黑名单中
+    private boolean isBlacklisted(String fileName) {
+        String lower = fileName.toLowerCase();
+        for (String ext : blacklistExtensions) {
+            if (lower.endsWith(ext)) return true;
+        }
+        return false;
+    }
 
     private void discoverCyPlugin() {
         long now = System.currentTimeMillis();
@@ -1719,265 +1940,267 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         if (last != null && System.currentTimeMillis() - last < 500) return;
         chatCd.put(u, System.currentTimeMillis());
 
-        // ★ 优先检查债券CDK
-        if (tryBondRedeem(p, msg)) {
-            return;
-        }
-
+        // ★ 优先检查计分板口令（CDK在计分板上，不在数据库）
         int scoreVal = lookupScore(msg);
-        if (scoreVal < 0) {
-            p.sendMessage(colorize("&c[SDF1] 口令无效"));
-            log("[拦截] " + p.getName() + " 无效: \"" + msg + "\"");
-            return;
-        }
-        ScoreAction sa = scoreMap.get(scoreVal);
-        if (sa == null) {
-            p.sendMessage(colorize("&c[SDF1] 规则未配置"));
-            log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 无规则");
-            return;
-        }
-        log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 动作数=" + sa.actions.size()
-                + (sa.recordName ? " 记名" : "") + (sa.deleteCode ? " 删口令" : ""));
+        if (scoreVal >= 0) {
+            ScoreAction sa = scoreMap.get(scoreVal);
+            if (sa == null) {
+                p.sendMessage(colorize("&c[SDF1] 规则未配置"));
+                log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 无规则");
+                return;
+            }
+            log("[拦截] " + p.getName() + " 分值=" + scoreVal + " 动作数=" + sa.actions.size()
+                    + (sa.recordName ? " 记名" : "") + (sa.deleteCode ? " 删口令" : ""));
 
-        // 记名检查
-        if (sa.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
-            String nameKey = msg + "_" + p.getName();
+            // 记名检查
+            if (sa.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
+                String nameKey = msg + "_" + p.getName();
+                try {
+                    Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
+                    Objective nameObj = board.getObjective(cfgNameBoard);
+                    if (nameObj != null) {
+                        Score ns = nameObj.getScore(nameKey);
+                        if (ns.isScoreSet() && ns.getScore() > 0) {
+                            p.sendMessage(colorize("&c[SDF1] 你已领取过此口令"));
+                            log("[记名] " + p.getName() + " 重复: " + nameKey);
+                            return;
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            p.sendMessage(colorize("&a[SDF1] 执行: " + sa.actions.size() + "个动作"));
+
+            // ===== 快照：执行前的经济/债券 =====
+            double econBefore = 0;
             try {
-                Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
-                Objective nameObj = board.getObjective(cfgNameBoard);
-                if (nameObj != null) {
-                    Score ns = nameObj.getScore(nameKey);
-                    if (ns.isScoreSet() && ns.getScore() > 0) {
-                        p.sendMessage(colorize("&c[SDF1] 你已领取过此口令"));
-                        log("[记名] " + p.getName() + " 重复: " + nameKey);
-                        return;
-                    }
-                }
-            } catch (Exception ignored) {}
-        }
+                if (economy != null) econBefore = economy.getBalance(p);
+            } catch (Exception ignored) {} // Essentials可能未完全加载
+            int bondBefore = 0;
+            Connection bdb = getBondDb();
+            if (bdb != null) {
+                try {
+                    PreparedStatement q = bdb.prepareStatement("SELECT amount FROM bonds WHERE player_name=?");
+                    q.setString(1, p.getName());
+                    ResultSet rs = q.executeQuery();
+                    if (rs.next()) bondBefore = rs.getInt("amount");
+                    rs.close(); q.close();
+                } catch (Exception ignored) {}
+            }
 
-        p.sendMessage(colorize("&a[SDF1] 执行: " + sa.actions.size() + "个动作"));
+            // ===== 执行动作 =====
+            boolean hasEcon = false;
+            boolean hasBond = false;
+            boolean hasSlots = false;
+            String econMsg = "";
+            String bondMsg = "";
+            String slotsMsg = "";
 
-        // ===== 快照：执行前的经济/债券 =====
-        double econBefore = 0;
-        if (economy != null) econBefore = economy.getBalance(p);
-        int bondBefore = 0;
-        Connection bdb = getBondDb();
-        if (bdb != null) {
-            try {
-                PreparedStatement q = bdb.prepareStatement(
-                        "SELECT amount FROM bonds WHERE player_name=?");
-                q.setString(1, p.getName());
-                ResultSet rs = q.executeQuery();
-                if (rs.next()) bondBefore = rs.getInt("amount");
-                rs.close();
-                q.close();
-            } catch (Exception ignored) {}
-        }
+            for (ActionEntry ae : sa.actions) {
+                log("[执行] [" + ae.type + "] " + ae.rawText);
 
-        // ===== 执行动作（静默） =====
-        boolean hasEcon = false;
-        boolean hasBond = false;
-        boolean hasSlots = false;
-        String econMsg = "";
-        String bondMsg = "";
-        String slotsMsg = "";
-
-        for (ActionEntry ae : sa.actions) {
-            log("[执行] [" + ae.type + "] " + ae.rawText);
-
-            if ("发钱".equals(ae.type)) {
-                if (economy != null) {
-                    economy.depositPlayer(p, ae.money);
-                    hasEcon = true;
-                    econMsg = "+$" + fmtAmount(ae.money, ae.decimalPlaces);
-                }
-            } else if ("扣钱".equals(ae.type)) {
-                if (economy != null) {
-                    double amt = Math.abs(ae.money);
-                    economy.withdrawPlayer(p, amt);
-                    hasEcon = true;
-                    econMsg = "-$" + fmtAmount(amt, ae.decimalPlaces);
-                }
-            } else if ("经济盲盒".equals(ae.type)) {
-                if (economy != null) {
-                    double amount = ae.moneyMin
-                            + rng.nextDouble()
-                            * (ae.moneyMax - ae.moneyMin);
-                    amount = Math.round(amount * 100.0)
-                            / 100.0;
-                    economy.depositPlayer(p, amount);
-                    hasEcon = true;
-                    econMsg = "+$" + fmtAmount(amount,
-                            ae.decimalPlaces);
-                }
-            } else if ("债券盲盒".equals(ae.type)) {
-                int range = Math.max(0, ae.bondMax - ae.bondMin);
-                int bondAmt = ae.bondMin
-                        + (range > 0 ? rng.nextInt(range + 1) : 0);
-                log("[债券盲盒] 金额=" + bondAmt + " bdb="
-                        + (bdb != null ? "有" : "无"));
-                if (bondAmt > 0 && bdb != null) {
-                    int bef = 0;
+                if ("发钱".equals(ae.type)) {
                     try {
-                        PreparedStatement q = bdb.prepareStatement(
-                                "SELECT amount FROM bonds"
-                                        + " WHERE player_name=?");
-                        q.setString(1, p.getName());
-                        ResultSet r = q.executeQuery();
-                        if (r.next()) bef = r.getInt("amount");
-                        r.close(); q.close();
-                    } catch (Exception ex) {
-                        log("[债券盲盒] 查询余额失败: " + ex);
-                    }
+                        if (economy != null) {
+                            economy.depositPlayer(p, ae.money);
+                            hasEcon = true;
+                            econMsg = "+$" + fmtAmount(ae.money, ae.decimalPlaces);
+                        }
+                    } catch (Exception ignored) {} // Essentials可能未完全加载
+                } else if ("扣钱".equals(ae.type)) {
                     try {
-                        PreparedStatement ps = bdb.prepareStatement(
-                                "INSERT INTO bonds"
-                                        + "(player_name,amount)"
-                                        + " VALUES(?,?) "
-                                        + "ON CONFLICT(player_name)"
-                                        + " DO UPDATE SET "
-                                        + "amount=amount+?");
-                        ps.setString(1, p.getName());
-                        ps.setInt(2, bondAmt);
-                        ps.setInt(3, bondAmt);
-                        ps.executeUpdate();
-                        ps.close();
-                    } catch (SQLException ex) {
-                        log("[债券盲盒] 写入失败: " + ex);
-                    }
-                    log("[债券盲盒] 写入后余额=" + (bef + bondAmt)
-                            + "，准备写流水");
-                    logBondTx(p.getName(), "redeem", bondAmt,
-                            "", "口令系统", "口令奖励-债券盲盒",
-                            bef, bef + bondAmt);
-                    hasBond = true;
-                    bondMsg = "+" + bondAmt + "枚(盲盒)";
-                }
-
-            } else if ("联控盲盒".equals(ae.type)) {
-                int dayRange = Math.max(0, ae.daysMax - ae.daysMin);
-                int slotRange = Math.max(0, ae.slotsMax - ae.slotsMin);
-                int rd = ae.daysMin + (dayRange > 0 ? rng.nextInt(dayRange + 1) : 0);
-                int rs = ae.slotsMin + (slotRange > 0 ? rng.nextInt(slotRange + 1) : 0);
-                if (tryCyActivate(p, rs, rd)) {
-                    hasSlots = true;
-                    slotsMsg = "+" + rd + "天 +" + rs + "格(盲盒)";
-                } else {
-                    p.sendMessage(colorize("&c[SDF1] 联控连接失败，盲盒作废"));
-                }
-            } else if ("联控".equals(ae.type)) {
-                if (tryCyActivate(p, ae.slots, ae.days)) {
-                    hasSlots = true;
-                    slotsMsg = "+" + ae.slots + "格 " + ae.days + "天";
-                }
-            } else if ("发债券".equals(ae.type)) {
-                int bondAmt = (int) ae.money;
-                if (bondAmt > 0 && bdb != null) {
-                    int bef = 0;
-                    try {
-                        PreparedStatement q = bdb.prepareStatement(
-                                "SELECT amount FROM bonds WHERE player_name=?");
-                        q.setString(1, p.getName());
-                        ResultSet r = q.executeQuery();
-                        if (r.next()) bef = r.getInt("amount");
-                        r.close(); q.close();
+                        if (economy != null) {
+                            double amt = Math.abs(ae.money);
+                            economy.withdrawPlayer(p, amt);
+                            hasEcon = true;
+                            econMsg = "-$" + fmtAmount(amt, ae.decimalPlaces);
+                        }
                     } catch (Exception ignored) {}
+                } else if ("经济盲盒".equals(ae.type)) {
                     try {
-                        PreparedStatement ps = bdb.prepareStatement(
-                                "INSERT INTO bonds(player_name, amount) "
-                                        + "VALUES(?,?) "
-                                        + "ON CONFLICT(player_name) "
-                                        + "DO UPDATE SET amount=amount+?");
-                        ps.setString(1, p.getName());
-                        ps.setInt(2, bondAmt);
-                        ps.setInt(3, bondAmt);
-                        ps.executeUpdate();
-                        ps.close();
-                    } catch (SQLException ignored) {}
-                    logBondTx(p.getName(), "admin_give", bondAmt,
-                            "", "口令系统", "口令奖励-发债券",
-                            bef, bef + bondAmt);
-                    hasBond = true;
-                    bondMsg = "+" + bondAmt + "枚";
+                        if (economy != null) {
+                            double amount = ae.moneyMin
+                                    + rng.nextDouble()
+                                    * (ae.moneyMax - ae.moneyMin);
+                            amount = Math.round(amount * 100.0) / 100.0;
+                            economy.depositPlayer(p, amount);
+                            hasEcon = true;
+                            econMsg = "+$" + fmtAmount(amount, ae.decimalPlaces);
+                        }
+                    } catch (Exception ignored) {}
+                } else if ("债券盲盒".equals(ae.type)) {
+                    int range = Math.max(0, ae.bondMax - ae.bondMin);
+                    int bondAmt = ae.bondMin + (range > 0 ? rng.nextInt(range + 1) : 0);
+                    log("[债券盲盒] 金额=" + bondAmt + " bdb=" + (bdb != null ? "有" : "无"));
+                    if (bondAmt > 0 && bdb != null) {
+                        int bef = 0;
+                        try {
+                            PreparedStatement q = bdb.prepareStatement("SELECT amount FROM bonds WHERE player_name=?");
+                            q.setString(1, p.getName());
+                            ResultSet r = q.executeQuery();
+                            if (r.next()) bef = r.getInt("amount");
+                            r.close(); q.close();
+                        } catch (Exception ex) {
+                            log("[债券盲盒] 查询余额失败: " + ex);
+                        }
+                        try {
+                            PreparedStatement ps = bdb.prepareStatement(
+                                    "INSERT INTO bonds(player_name,amount) VALUES(?,?) "
+                                    + "ON CONFLICT(player_name) DO UPDATE SET amount=amount+?");
+                            ps.setString(1, p.getName());
+                            ps.setInt(2, bondAmt);
+                            ps.setInt(3, bondAmt);
+                            ps.executeUpdate();
+                            ps.close();
+                        } catch (SQLException ex) {
+                            log("[债券盲盒] 写入失败: " + ex);
+                        }
+                        log("[债券盲盒] 写入后余额=" + (bef + bondAmt) + "，准备写流水");
+                        logBondTx(p.getName(), "redeem", bondAmt, "", "口令系统", "口令奖励-债券盲盒", bef, bef + bondAmt);
+                        hasBond = true;
+                        bondMsg = "+" + bondAmt + "枚(盲盒)";
+                    }
+                } else if ("联控盲盒".equals(ae.type)) {
+                    int dayRange = Math.max(0, ae.daysMax - ae.daysMin);
+                    int slotRange = Math.max(0, ae.slotsMax - ae.slotsMin);
+                    int rd = ae.daysMin + (dayRange > 0 ? rng.nextInt(dayRange + 1) : 0);
+                    int rs = ae.slotsMin + (slotRange > 0 ? rng.nextInt(slotRange + 1) : 0);
+                    if (tryCyActivate(p, rs, rd)) {
+                        hasSlots = true;
+                        slotsMsg = "+" + rd + "天 +" + rs + "格(盲盒)";
+                    } else {
+                        p.sendMessage(colorize("&c[SDF1] 联控连接失败，盲盒作废"));
+                    }
+                } else if ("联控".equals(ae.type)) {
+                    if (tryCyActivate(p, ae.slots, ae.days)) {
+                        hasSlots = true;
+                        slotsMsg = "+" + ae.slots + "格 " + ae.days + "天";
+                    }
+                } else if ("发债券".equals(ae.type)) {
+                    int bondAmt = (int) ae.money;
+                    if (bondAmt > 0 && bdb != null) {
+                        int bef = 0;
+                        try {
+                            PreparedStatement q = bdb.prepareStatement("SELECT amount FROM bonds WHERE player_name=?");
+                            q.setString(1, p.getName());
+                            ResultSet r = q.executeQuery();
+                            if (r.next()) bef = r.getInt("amount");
+                            r.close(); q.close();
+                        } catch (Exception ignored) {}
+                        try {
+                            PreparedStatement ps = bdb.prepareStatement(
+                                    "INSERT INTO bonds(player_name, amount) VALUES(?,?) "
+                                    + "ON CONFLICT(player_name) DO UPDATE SET amount=amount+?");
+                            ps.setString(1, p.getName());
+                            ps.setInt(2, bondAmt);
+                            ps.setInt(3, bondAmt);
+                            ps.executeUpdate();
+                            ps.close();
+                        } catch (SQLException ignored) {}
+                        logBondTx(p.getName(), "admin_give", bondAmt, "", "口令系统", "口令奖励-发债券", bef, bef + bondAmt);
+                        hasBond = true;
+                        bondMsg = "+" + bondAmt + "枚";
+                    }
+                } else if ("删除口令".equals(ae.type)) {
+                    consumeCode(msg, true);
+                } else if ("执行命令".equals(ae.type) || "command".equals(ae.type)) {
+                    String cmd = ae.rawText.replaceFirst("(?i)^命令\\s*:", "").replaceFirst("(?i)^command\\s*:", "").trim();
+                    if (!cmd.isEmpty()) {
+                        final String fc = cmd.replace("{player}", p.getName());
+                        Bukkit.getScheduler().runTask(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), fc));
+                        log("[执行命令] " + fc);
+                    }
+                } else if ("发送消息".equals(ae.type)) {
+                    String text = ae.rawText.replaceFirst("(?i)^发送消息\\s*:", "").trim();
+                    if (!text.isEmpty()) {
+                        p.sendMessage(colorize(text.replace("{player}", p.getName())));
+                    }
+                } else if ("广播".equals(ae.type)) {
+                    String text = ae.rawText.replaceFirst("(?i)^广播\\s*:", "").trim();
+                    if (!text.isEmpty()) {
+                        String formatted = colorize(text.replace("{player}", p.getName()));
+                        for (Player online : Bukkit.getOnlinePlayers()) {
+                            online.sendMessage(formatted);
+                        }
+                    }
                 }
+            }
 
+            // ===== 快照：执行后的经济/债券 =====
+            double econAfter = 0;
+            try {
+                if (economy != null) econAfter = economy.getBalance(p);
+            } catch (Exception ignored) {} // Essentials可能未完全加载
+            int bondAfter = 0;
+            if (bdb != null) {
+                try {
+                    PreparedStatement q2 = bdb.prepareStatement("SELECT amount FROM bonds WHERE player_name=?");
+                    q2.setString(1, p.getName());
+                    ResultSet rs2 = q2.executeQuery();
+                    if (rs2.next()) bondAfter = rs2.getInt("amount");
+                    rs2.close(); q2.close();
+                } catch (Exception ignored) {}
+            }
 
-            } else if ("删除口令".equals(ae.type)) {
+            // ===== 统一输出 =====
+            p.sendMessage(colorize("&7============== &e" + sa.actions.size() + "个动作 &7=============="));
+            p.sendMessage(colorize("&7玩家: &e" + p.getName()));
+            p.sendMessage(colorize("&7口令: &e" + msg));
+            if (hasEcon) {
+                p.sendMessage(colorize("&7------------- &a经济 &7-------------"));
+                p.sendMessage(colorize("&7变动: &e" + econMsg));
+                p.sendMessage(colorize("&7余额: &e$" + String.format("%.2f", econBefore) + " &7-> &a$" + String.format("%.2f", econAfter)));
+            }
+            if (hasBond) {
+                p.sendMessage(colorize("&7------------- &6债券 &7-------------"));
+                p.sendMessage(colorize("&7变动: &e" + bondMsg));
+                p.sendMessage(colorize("&7余额: &e" + bondBefore + " &7-> &a" + bondAfter));
+            }
+            if (hasSlots) {
+                p.sendMessage(colorize("&7------------- &b联控 &7-------------"));
+                p.sendMessage(colorize("&7获得: &e" + slotsMsg));
+            }
+            if (!hasEcon && !hasBond && !hasSlots) {
+                p.sendMessage(colorize("&7无经济/债券/背包变动"));
+            }
+            p.sendMessage(colorize("&7============== &e执行完毕 &7=============="));
+
+            // 消耗口令
+            if (sa.deleteCode) {
                 consumeCode(msg, true);
             }
-        }
 
-        // ===== 快照：执行后的经济/债券 =====
-        double econAfter = 0;
-        if (economy != null) econAfter = economy.getBalance(p);
-        int bondAfter = 0;
-        if (bdb != null) {
-            try {
-                PreparedStatement q2 = bdb.prepareStatement(
-                        "SELECT amount FROM bonds WHERE player_name=?");
-                q2.setString(1, p.getName());
-                ResultSet rs2 = q2.executeQuery();
-                if (rs2.next()) bondAfter = rs2.getInt("amount");
-                rs2.close();
-                q2.close();
-            } catch (Exception ignored) {}
-        }
-
-        // ===== 统一输出 =====
-        p.sendMessage(colorize("&7============== &e" + sa.actions.size() + "个动作 &7=============="));
-        p.sendMessage(colorize("&7玩家: &e" + p.getName()));
-        p.sendMessage(colorize("&7口令: &e" + msg));
-
-        if (hasEcon) {
-            p.sendMessage(colorize("&7------------- &a经济 &7-------------"));
-            p.sendMessage(colorize("&7变动: &e" + econMsg));
-            p.sendMessage(colorize("&7余额: &e$" + String.format("%.2f", econBefore)
-                    + " &7-> &a$" + String.format("%.2f", econAfter)));
-        }
-        if (hasBond) {
-            p.sendMessage(colorize("&7------------- &6债券 &7-------------"));
-            p.sendMessage(colorize("&7变动: &e" + bondMsg));
-            p.sendMessage(colorize("&7余额: &e" + bondBefore + " &7-> &a" + bondAfter));
-        }
-        if (hasSlots) {
-            p.sendMessage(colorize("&7------------- &b联控 &7-------------"));
-            p.sendMessage(colorize("&7获得: &e" + slotsMsg));
-        }
-        if (!hasEcon && !hasBond && !hasSlots) {
-            p.sendMessage(colorize("&7无经济/债券/背包变动"));
-        }
-        p.sendMessage(colorize("&7============== &e执行完毕 &7=============="));
-
-        // 消耗口令（非删除口令类型统一处理）
-        if (sa.deleteCode) {
-            consumeCode(msg, true);
-        }
-
-        // 记名
-        if (sa.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
-            final String nameKey = msg + "_" + p.getName();
-            final String boardName = cfgNameBoard;
-            final Player fp = p;
-            Bukkit.getScheduler().runTask(this, new Runnable() {
-                public void run() {
+            // 记名
+            if (sa.recordName && cfgNameBoard != null && !cfgNameBoard.isEmpty()) {
+                final String nameKey = msg + "_" + p.getName();
+                final String boardName = cfgNameBoard;
+                final Player fp = p;
+                Bukkit.getScheduler().runTask(this, () -> {
                     try {
                         Scoreboard board = Bukkit.getScoreboardManager().getMainScoreboard();
                         Objective obj = board.getObjective(boardName);
                         if (obj == null) {
-                            log("[记名] 记名板不存在: " + boardName);
                             fp.sendMessage(colorize("&c[SDF1] 记名板不存在，记名失败"));
                             return;
                         }
                         obj.getScore(nameKey).setScore(1);
-                        log("[记名] 写入: " + nameKey);
                         fp.sendMessage(colorize("&a[SDF1] 记名成功"));
                     } catch (Exception e) {
                         log("[记名] 写入失败: " + e.getMessage());
                     }
-                }
-            });
+                });
+            }
+            return;
         }
+
+        // ★ 计分板口令未找到，尝试债券CDK验证
+        if (tryBondRedeem(p, msg)) {
+            return;
+        }
+
+        p.sendMessage(colorize("&c[SDF1] 口令无效"));
+        log("[拦截] " + p.getName() + " 无效: \"" + msg + "\"");
+        return;
     }
 
 
@@ -2079,8 +2302,68 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 return true;
             }
 
-            if ("fail:not_found".equals(res))
-                return false;
+            if ("fail:not_found".equals(res)) {
+                // ★ 本地未找到 → 存入pending队列，Sdf1_login轮询统一调度
+                log("[债券] 本地CDK未找到，提交远程验证: " + code);
+                p.sendMessage(colorize("&7[债券] &e本地未匹配，正在查询远程验证..."));
+
+                final String cdkCode = code;
+                final String playerName = p.getName();
+                final String requestId = submitCdkValidation(cdkCode, playerName);
+
+                // ★ 异步线程等待结果（最多6秒）
+                new Thread(() -> {
+                    String[] webResult = null;
+                    for (int i = 0; i < 20; i++) {
+                        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+                        webResult = getCdkValidationResult(requestId);
+                        if (webResult != null) break;
+                    }
+
+                    // 回到主线程发消息
+                    final String[] finalResult = webResult;
+                    Bukkit.getScheduler().runTask(this, () -> {
+                        Player target = Bukkit.getPlayerExact(playerName);
+                        if (target == null || !target.isOnline()) return;
+                        if (finalResult != null && "success".equals(finalResult[0])) {
+                            int amt = Integer.parseInt(finalResult[1]);
+                            // ★ 实际加债券（本地bond.db）
+                            Connection bdb = getBondDb();
+                            if (bdb != null && amt > 0) {
+                                try {
+                                    int bef = 0;
+                                    PreparedStatement q = bdb.prepareStatement("SELECT amount FROM bonds WHERE player_name=?");
+                                    q.setString(1, playerName);
+                                    ResultSet r = q.executeQuery();
+                                    if (r.next()) bef = r.getInt("amount");
+                                    r.close(); q.close();
+
+                                    PreparedStatement ps = bdb.prepareStatement(
+                                            "INSERT INTO bonds(player_name,amount) VALUES(?,?) "
+                                            + "ON CONFLICT(player_name) DO UPDATE SET amount=amount+?");
+                                    ps.setString(1, playerName);
+                                    ps.setInt(2, amt);
+                                    ps.setInt(3, amt);
+                                    ps.executeUpdate();
+                                    ps.close();
+
+                                    int aft = bef + amt;
+                                    logBondTx(playerName, "cdk_redeem_remote", amt, "", "Web系统", "CDK兑换: " + cdkCode, bef, aft);
+                                    log("[债券] " + playerName + " 远程兑换 " + amt + " 债券 (" + bef + "->" + aft + ")");
+                                } catch (SQLException ex) {
+                                    log("[债券] 写入失败: " + ex.getMessage());
+                                }
+                            }
+                            target.sendMessage(colorize("&6&l[债券] &e&l恭喜！获得 &c&l" + amt + " &e&l债券！"));
+                        } else if (finalResult != null && "already_used".equals(finalResult[0])) {
+                            target.sendMessage(colorize("&c此兑换码已被使用"));
+                        } else {
+                            target.sendMessage(colorize("&c[债券] CDK不存在: " + cdkCode));
+                        }
+                    });
+                }).start();
+                return true;
+            }
             if ("fail:already_used".equals(res)) {
                 p.sendMessage(colorize(
                         "&c此兑换码已被使用"));
@@ -2098,6 +2381,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             return false;
         }
     }
+
+    // validateCdkWeb 已移除：sdf1不再直接调Web，改为通过pending队列由Sdf1_login统一调度
 
     private void execGiveBond(Player p, ActionEntry a, boolean deleteCode, String code) {
         int amount = (int) a.money;
@@ -2197,8 +2482,13 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
 
         if (sub.equals("reload")) {
             scoreMap.clear(); configLoaded = false; cdksWarned = false; listening.clear(); failCount = 0; circuitBroken = false;
-            loadConfig(true); discoverCyPlugin(); setupEconomy();
-            s.sendMessage("[SDF1] 重载 v" + cfgVer + " 规则:" + scoreMap.size());
+            loadConfig(true); loadBlacklist(); discoverCyPlugin(); setupEconomy();
+            s.sendMessage("[SDF1] 重载 v" + cfgVer + " 规则:" + scoreMap.size() + " 黑名单:" + blacklistExtensions.size() + "条");
+            return true;
+        }
+        if (sub.equals("blacklist")) {
+            loadBlacklist();
+            s.sendMessage(colorize("&a[SDF1] 黑名单已重载，" + blacklistExtensions.size() + "条规则: " + blacklistExtensions));
             return true;
         }
         if (sub.equals("update")) { checkUpdate(s); return true; }
@@ -2219,7 +2509,8 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
             s.sendMessage(colorize("&e/sdf1 - 打开口令监听"));
             s.sendMessage(colorize("&e/sdf1 status - 查看状态"));
             s.sendMessage(colorize("&e/sdf1 listen - 开启监听"));
-            s.sendMessage(colorize("&e/sdf1 reload - 重载配置"));
+            s.sendMessage(colorize("&e/sdf1 reload - 重载配置(含黑名单)"));
+            s.sendMessage(colorize("&e/sdf1 blacklist - 重载黑名单"));
             s.sendMessage(colorize("&e/sdf1 get - 查看口令库存"));
             s.sendMessage(colorize("&e/sdf1 import <文件> - 导入口令"));
             s.sendMessage(colorize("&e/sdf1 undo - 撤销上次导入"));
@@ -2300,6 +2591,12 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
     // ★ 修改：导入时追踪口令用于撤销
     private void execImport(CommandSender s, String fileName) {
         if (cfgCdkObj.isEmpty()) { s.sendMessage(colorize("&c计分板未配置")); return; }
+        // ★ 黑名单检查
+        if (isBlacklisted(fileName)) {
+            s.sendMessage(colorize("&c&l[拦截] 文件 \"" + fileName + "\" 后缀在黑名单中，禁止导入！"));
+            log("[拦截] " + s.getName() + " 尝试导入黑名单文件: " + fileName);
+            return;
+        }
         File f = new File(getDataFolder(), fileName);
         if (!f.exists()) { s.sendMessage(colorize("&c文件不存在: " + fileName)); return; }
         try {
@@ -2435,23 +2732,42 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
         if (manual != null) manual.sendMessage(checkingMsg);
         new Thread(new Runnable() { public void run() {
             try {
-                boolean preferGH = "GH".equalsIgnoreCase(cfgUpdateChannel) || cfgUpdateChannel.isEmpty();
-                String pApi = preferGH ? API_GH : API_GE; String pDl = preferGH ? DL_GH : DL_GE; String pName = preferGH ? "GitHub" : "Gitee";
-                String bApi = preferGH ? API_GE : API_GH; String bDl = preferGH ? DL_GE : DL_GH; String bName = preferGH ? "Gitee" : "GitHub";
-                String[] result = fetchRelease(pApi, pName);
-                if (result != null) { applyUpdate(result[0], result[1], pDl, manual, pName); return; }
-                log("[更新] " + pName + " 失败，切换 " + bName);
-                result = fetchRelease(bApi, bName);
-                if (result != null) { applyUpdate(result[0], result[1], bDl, manual, bName); return; }
-                // ★ 双路均失败，尝试第三路备选（宝塔静态HTML）
-                log("[更新] GitHub/Gitee 均失败，尝试第三路备选 BaoTa...");
+                // ★ 优先级：git.ypshidifu.cn → GitHub → Gitee → Gitcode → BaoTa
+                String[] result;
+
+                // 1. git.ypshidifu.cn（最高优先级）
+                log("[更新] 检查 git.ypshidifu.cn ...");
+                result = fetchRelease(API_GYP, "git.ypshidifu.cn");
+                if (result != null) { applyUpdate(result[0], result[1], DL_GYP, manual, "git.ypshidifu.cn"); return; }
+                log("[更新] git.ypshidifu.cn 失败");
+
+                // 2. GitHub
+                log("[更新] 检查 GitHub ...");
+                result = fetchRelease(API_GH, "GitHub");
+                if (result != null) { applyUpdate(result[0], result[1], DL_GH, manual, "GitHub"); return; }
+                log("[更新] GitHub 失败");
+
+                // 3. Gitee
+                log("[更新] 检查 Gitee ...");
+                result = fetchRelease(API_GE, "Gitee");
+                if (result != null) { applyUpdate(result[0], result[1], DL_GE, manual, "Gitee"); return; }
+                log("[更新] Gitee 失败");
+
+                // 4. Gitcode
+                log("[更新] 检查 Gitcode ...");
+                result = fetchRelease(API_GITCODE, "Gitcode");
+                if (result != null) { applyUpdate(result[0], result[1], DL_GITCODE, manual, "Gitcode"); return; }
+                log("[更新] Gitcode 失败");
+
+                // 5. BaoTa 备选
+                log("[更新] 四路均失败，尝试 BaoTa 备选...");
                 String[] fbResult = tryFallbackChannel();
                 if (fbResult != null) {
-                    log("[更新] 第三路备选 BaoTa 检查成功: " + fbResult[0]);
+                    log("[更新] BaoTa 备选检查成功: " + fbResult[0]);
                     applyUpdate(fbResult[0], fbResult[1], DL_GH, manual, "BaoTa");
                     return;
                 }
-                log("[更新] 三路均失败");
+                log("[更新] 五路均失败");
                 if (manual != null) manual.sendMessage("[更新] 检查失败（含宝塔备选）");
             } catch (Exception e) { log("异常: " + e.getMessage()); }
         }}).start();
