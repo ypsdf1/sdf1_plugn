@@ -2311,10 +2311,12 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                 final String playerName = p.getName();
                 final String requestId = submitCdkValidation(cdkCode, playerName);
 
-                // ★ 异步线程等待结果（最多6秒）
+                // ★ 异步线程等待结果（最多45秒）
+                //   Sdf1_login 侧遇到HTTP失败/锁库/解析异常会自动重排队，最多4轮，
+                //   所以这里要留够时间，否则远端明明匹配到了也会被判成"未匹配"。
                 new Thread(() -> {
                     String[] webResult = null;
-                    for (int i = 0; i < 20; i++) {
+                    for (int i = 0; i < 150; i++) {
                         try { Thread.sleep(300); } catch (InterruptedException ignored) {}
                         webResult = getCdkValidationResult(requestId);
                         if (webResult != null) break;
@@ -2357,8 +2359,15 @@ public class Main extends JavaPlugin implements Listener, CommandExecutor {
                             target.sendMessage(colorize("&6&l[债券] &e&l恭喜！获得 &c&l" + amt + " &e&l债券！"));
                         } else if (finalResult != null && "already_used".equals(finalResult[0])) {
                             target.sendMessage(colorize("&c此兑换码已被使用"));
-                        } else {
+                        } else if (finalResult == null) {
+                            // ★ 超时 ≠ 不存在：远端可能只是锁库/网络抖动，别谎报未匹配
+                            log("[债券] 远程验证超时 code=" + cdkCode + " player=" + playerName);
+                            target.sendMessage(colorize("&c[债券] 远程验证超时，请稍后再试一次"));
+                        } else if ("not_found".equals(finalResult[0])) {
                             target.sendMessage(colorize("&c[债券] CDK不存在: " + cdkCode));
+                        } else {
+                            log("[债券] 远程验证异常 code=" + cdkCode + " status=" + finalResult[0]);
+                            target.sendMessage(colorize("&c[债券] CDK验证失败(" + finalResult[0] + ")，请稍后再试"));
                         }
                     });
                 }).start();
